@@ -1,0 +1,63 @@
+setwd("C:/Users/jwambaug/git/SEEM3/SEEM3/R/")
+
+load("../data/descriptor-names-2018-06-04.RData")
+load("../data/Ring2018ScaleCenter.RData")
+load("../data/Ring2018Preds.RData")
+load("../data/globals.RData")
+load("../data/Ring2018PathwayRFModels.RData")
+load("../data/StockholmConvention.RData")
+load("../data/CDR-HPV.RData")
+load("../data/MCMC-2018-06-05.RData")
+load("../data/nhanesstats.RData")
+load("../data/modelstats.RData")
+load("../data/knowndeltas.RData"
+load("../data/globals.RData")
+load("../data/pathmodel-2018-06-05.RData")
+
+library(data.table)
+library(randomForest)
+library(parallel)
+library(readxl)
+
+toxval <- read_excel("Copy of toxval_chemicals_2020-09-03.xlsx")
+
+source("lit_intakerate.R")
+sort.chems <- lit_intakerate(toxval$dtxsid)
+
+chem.ids <- sort.chems$unmatched
+write.csv(chem.ids,file="unmatchedids.txt",row.names=F)
+
+tv1.opera <- read.csv("toxval-opera-1.tsv",stringsAsFactors=F,sep="\t")
+tv2.opera <- read.csv("toxval-opera-2.tsv",stringsAsFactors=F,sep="\t")
+tv3.opera <- read.csv("toxval-opera-3.tsv",stringsAsFactors=F,sep="\t")
+tv4.opera <- read.csv("toxval-opera-4.tsv",stringsAsFactors=F,sep="\t")
+tv5.opera <- read.csv("toxval-opera-5.tsv",stringsAsFactors=F,sep="\t")
+tv1.toxprint <- read.csv("toxval-toxprint-1.tsv",stringsAsFactors=F,sep="\t")
+tv2.toxprint <- read.csv("toxval-toxprint-2.tsv",stringsAsFactors=F,sep="\t")
+tv3.toxprint <- read.csv("toxval-toxprint-3.tsv",stringsAsFactors=F,sep="\t")
+tv4.toxprint <- read.csv("toxval-toxprint-4.tsv",stringsAsFactors=F,sep="\t")
+tv5.toxprint <- read.csv("toxval-toxprint-5.tsv",stringsAsFactors=F,sep="\t")
+
+chems <- rbind(
+  merge(tv1.opera,tv1.toxprint),
+  merge(tv2.opera,tv2.toxprint),
+  merge(tv3.opera,tv3.toxprint),
+  merge(tv4.opera,tv4.toxprint),
+  merge(tv5.opera,tv5.toxprint))
+    
+chems.noopera <- subset(chems,is.na(as.numeric(OCTANOL_WATER_PARTITION_LOGP_OPERA_PRED)))
+chems.noopera <- subset(chems.noopera,!is.na(as.numeric(AVERAGE_MASS)))
+
+write.csv(chems.noopera$DTXSID,file="chems.for.opera.txt",row.names=F,quote=F)    
+# No SMILES, it turns out
+     
+source("predict_pathways.R")
+
+chems <- predict_pathways(chems,file.stub="output/new-seem")
+
+source("predict_intakerate.R")
+source("fast_seem.R")
+
+chems2 <- predict_intakerate(chems,file.stub="output/new-seem")
+
+                                                                                )

@@ -1,0 +1,23 @@
+Package: SEEM2Predictor
+Version: 0.0.1
+Date: 2020-09-03
+Title: SEEM3 High Throughput Exposure Prediction
+Author: John Wambaugh [aut, cre]
+Maintainer: John Wambuagh <wambaugh.john@epa.gov>
+Description: A function for providing high throughput chemical intake
+  rate (mg/kg bw/day)
+  estimates for the median U.S. population. This model is described in 
+  Ring et al. (2018) 
+  <https://doi.org/10.1021/acs.est.8b04056>. Chemicals with pre-computed
+  predictions are identified by DTXSID (DSStox Structure ID's from 
+  the CompTox Chemcials Dashboard
+  http://comptox.epa.gov/dashboard/). New chemicals are characterized 
+  by ToxPrint chemotypes and OPERA physico-chemical predictions.
+  Returned value are select 
+  quantiles of the posterior distribution of the estimate of the 
+  population geometric mean exposure rate (assumed to be log-normal).
+License: Unlimited
+LazyData: TRUE
+ByteCompile: TRUE
+NeedsCompilation: no
+Packaged: 
