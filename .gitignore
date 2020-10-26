@@ -1,0 +1,25 @@
+###################
+# Don't track content of these folders
+###################
+httk/R/output/
+httk/src-i386/
+httk/src-x64/
+httk/build/
+httk.Rcheck/
+.Rproj.user/
+
+###################
+# Or these R files
+###################
+.Rbuildignore
+*.Rhistory
+*.Rproj
+
+
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
