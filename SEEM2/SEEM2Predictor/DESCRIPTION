@@ -1,0 +1,19 @@
+Package: SEEM2Predictor
+Version: 0.11
+Date: 2019-04-21
+Title: SEEM2 High Throughput Exposure Prediction
+Author: R. Woodrow Setzer [aut, cre] and John Wambaugh [aut]
+Maintainer: John Wambuagh <wambaugh.john@epa.gov>
+Description: A function for providing high throughput exposure
+  estimates for chemicals based on the Wambaugh et al. (2014) model
+  <https://doi.org/10.1021/es503583j>. Chemicals are identified either 
+  by CAS registry number or five chemical characteristics 
+  (production volume and four binary variables that very coarsely 
+  characterizes the chemical's use). Returned value are select 
+  quantiles of the posterior distribution of the estimate of the 
+  population geometric mean exposure rate (mg/kg bw/day).
+  License: Unlimited
+LazyData: TRUE
+ByteCompile: TRUE
+NeedsCompilation: no
+Packaged: 2016-06-10 21:09:48 UTC; wsetzer
