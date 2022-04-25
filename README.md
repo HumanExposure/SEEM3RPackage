@@ -22,7 +22,7 @@ inferred from biomonitoring data to evaluate and calibrate exposure
 predictors across as many chemicals as possible. Exposure predictors 
 include HTE models for predicting intake rates as well as presence 
 on the chemicals on various lists (such as high production or banned). 
-SEEM provides a quantitative estimate of uncertainty.](logo/seem-diagram.gif)
+SEEM provides a quantitative estimate of uncertainty.](logo/seem-diagram.png)
 
 ## General Population Consensus Model (SEEM3)
 
@@ -56,7 +56,8 @@ including children aged 6–11.
 
 ## External Peer Review
 
-In addition to being described in the peer-reviewed scientific literature these methods were partially reviewed by
+In addition to being described in the peer-reviewed scientific literature an earlier version
+of these methods was	 reviewed by
 a Federal Insecticide, Fungicide, and Rodenticide Act (FIFRA) Scientific Advisory Panel (SAP) on 
 "New High Throughput Methods to Estimate Chemical Exposure" in 2014: <https://www.regulations.gov/docket?D=EPA-HQ-OPP-2014-0614>
 
