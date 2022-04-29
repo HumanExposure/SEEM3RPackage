@@ -113,7 +113,7 @@ for (this.demo in names(HPreds))
   this.preds$Demographic <- demo.text
   seem2.demos <- rbind(seem2.demos, this.preds)
 } 
-seem2.demos$Predictor <- "SEEM2 Consensus"
+seem2.demos$Predictor <- "SEEM2 Heuristic"
 seem2.demos$Reference <- "Wambaugh 2014"
 seem2.demos$AD <- 1
 seem2.demos$Units <- "mg/kg/day"
