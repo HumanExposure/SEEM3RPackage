@@ -16,9 +16,8 @@ Description: A function for providing high throughput chemical intake
   Returned value are select 
   quantiles of the posterior distribution of the estimate of the 
   population geometric mean exposure rate (assumed to be log-normal).
-License: Unlimited
-LazyData: TRUE
-ByteCompile: TRUE
+License: GPL-3
+LazyData: true
 NeedsCompilation: no
 Packaged: 
 RoxygenNote: 7.2.3
