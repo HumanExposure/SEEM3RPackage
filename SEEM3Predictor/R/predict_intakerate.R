@@ -30,34 +30,6 @@ predict_intakerate<- function(
     !is.na(delta.Pest.pred) &
     !is.na(delta.Indust.pred))
 
-
-#MODEL.NAMES <- c(
-#  "SHEDS.Direct", 
-#  "SHEDS.Indirect",
-#  "FINE",
-#  "Food.Contact",
-#  "REDS",
-#  "RAIDAR",
-#  "RAIDAR.ICE",
-#  "USETox.Pest",
-#  "USETox.Indust",
-#  "USETox.Res",
-#  "USETox.Diet",
-#  "Production.Volume",
-#  "Stockholm")
-#NUM.MODELS <- length(MODEL.NAMES)
-# 
-#PATHWAY.NAMES <- c(
-#  "Diet",
-#  "Res",
-#  "Pest",
-#  "Indust")
-#NUM.PATHWAYS <- length(PATHWAY.NAMES)
-#deltas <- paste("delta",PATHWAY.NAMES,"pred",sep=".")
-#model.preds <- paste("Pred",MODEL.NAMES,"log.scale",sep=".")
-#save(MODEL.NAMES,NUM.MODELS,PATHWAY.NAMES,NUM.PATHWAYS,deltas,model.preds,
-#  file="../data/globals.RData")
-
 # Initialize model predictions (all NA's except Stockholm and production volume)
   for (this.model in MODEL.NAMES) 
   {

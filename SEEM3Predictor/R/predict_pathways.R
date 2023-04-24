@@ -1,11 +1,3 @@
-# Git (rightly) balks at files >100MB so we need to rebuild this list:
-pathway.RF <- list(
-  Diet=SEEM3Predictor::pathway.diet,
-  Indust=SEEM3Predictor::pathway.indust,
-  Pest=SEEM3Predictor::pathway.pest,
-  Res=SEEM3Predictor::pathway.res 
-)
-
 #'Calculate the probabality of exposure via various pathways.
 #'
 #' @description
@@ -38,6 +30,13 @@ predict_pathways<- function(
   file.stub="new-seem",
   rand.seed=123456)
 {
+  # Git (rightly) balks at files >100MB so we need to rebuild this list:
+  pathway.RF <- list(
+    Diet=pathway.diet,
+    Indust=pathway.indust,
+    Pest=pathway.pest,
+    Res=pathway.res 
+  )
 # set the random number generator seed for reproductibility:
   set.seed(rand.seed)
 
