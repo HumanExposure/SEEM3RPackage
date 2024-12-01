@@ -9,6 +9,7 @@
 #' predictions of exposure pathways." 
 #' Environmental Science & Technology 53.2 (2018): 719-732.
 #'
+#'@export fast_seem
 fast_seem <- function(x)
 {
   delta.vec <- unlist(chem.preds[dsstox_substance_id==x,deltas,with=F])
