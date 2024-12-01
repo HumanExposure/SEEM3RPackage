@@ -1,6 +1,6 @@
 Package: SEEM3Predictor
-Version: 0.0.2
-Date: 2023-04-23
+Version: 0.0.3
+Date: 2024-12-01
 Title: SEEM3 High Throughput Exposure Prediction
 Author: John Wambaugh [aut, cre]
 Maintainer: John Wambuagh <wambaugh.john@epa.gov>
@@ -20,5 +20,5 @@ License: GPL-3
 LazyData: true
 NeedsCompilation: no
 Packaged: 
-RoxygenNote: 7.2.3
+RoxygenNote: 7.3.2
 Encoding: UTF-8

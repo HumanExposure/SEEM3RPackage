@@ -257,7 +257,7 @@ predict_intakerate<- function(
 # clean up memory:
   gc()
 # Write out the chemical descriptors with intake rates added:
-  save(chem.preds, paste(file.stub,"-SEEM3-",Sys.Date(),".RData",sep=""))  
+  save(chem.preds, file=paste(file.stub,"-SEEM3-",Sys.Date(),".RData",sep=""))  
 
   return(chem.preds)
 }

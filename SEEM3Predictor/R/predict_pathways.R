@@ -299,7 +299,7 @@ print(signif(mean.discrepancy,2))
 # clean up memory:
   gc()
 # Write out the chemical descriptors wtih pathway predictions added:
-  save(chem.props, paste(file.stub,"-deltas-",Sys.Date(),".RData",sep=""))  
+  save(chem.props, file=paste(file.stub,"-PathwayDeltas-",Sys.Date(),".RData",sep=""))  
 
   return(chem.props)
 }
