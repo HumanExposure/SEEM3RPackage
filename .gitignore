@@ -14,7 +14,7 @@ httk.Rcheck/
 .Rbuildignore
 *.Rhistory
 *.Rproj
-
+*.tar.gz
 
 *.com
 *.class
