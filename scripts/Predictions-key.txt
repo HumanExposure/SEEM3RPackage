@@ -1,0 +1,43 @@
+These are estimates of the average (geometric mean) exposure rate (mg/kg 
+bodyweight/day) for various U.S. populations. 
+We are 50% confident that the exposure 
+for the chemical is below the median estimate, and we are 95% confident that 
+the average exposure rate is netweem the lower and upper 95th percentile limits.
+Total 
+population predictions are based upon consensus exposure model predictions and 
+the similarity of the compound to those chemicals monitored by NHANES. The 
+method for the total U.S. population was described in a 2018 publication, 
+"Consensus Modeling of Median Chemical Intake for the U.S. Population Based on 
+Predictions of Exposure Pathways" (https://doi.org/10.1021/acs.est.8b04056). 
+When available, demographic-specific 
+predictions are based upon a simpler, heuristic model described in the 2014 
+publication "High Throughput Heuristics for Prioritizing Human Exposure to 
+Environmental Chemicals" (https://doi.org/10.1021/es503583j).
+
+Columns for Demographic-Exposure-Predictions-[DATE].txt:
+DTXSID: DSSTox Substance Identifier 
+Demographic: Demographic group for prediction (can be "Total" U.S. population)
+Predictor: Prediction model used
+Median: Median value for the prediction
+L95: Lower 95th percentile value for the prediction
+U95: Upper 95th percentile value for the prediction
+Units: Units for the prediction
+AD: 1 if the chemical is within the applicability domain, 0 if not
+Reference: Reference for the prediction model used  
+
+Fpr the general predictions:
+Production volume is determined from the geometric mean of bins identified by 
+the 2006 EPA Inventory Update Rule (IUR). Presence on the Stockholm Convention 
+list of banned persistent organic pollutants was determined as of 2017. 
+Probability for exposure via specific pathways was predicted using machine 
+learning models by Ring et al. 2018.
+
+Columns for General-Exposure-Predictions-[DATE].txt:
+DTXSID: DSSTox Substance Identifier 
+Production Volume: U.S. national production volume
+Units: Units for production volume
+Stockholm Convention: Whether (1) or not (0) the chemical is listed by the Stockholm Convention on Persistent Organic Pollutants 
+Probability Dietary: Likelihood from 0 (none) to 1 (certain)
+Probability Residential: Likelihood from 0 (none) to 1 (certain) 
+Probability Far-Field Pesticde: Likelihood from 0 (none) to 1 (certain) 
+Probability Industrial: Likelihood from 0 (none) to 1 (certain)
