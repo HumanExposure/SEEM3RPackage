@@ -1,0 +1,858 @@
+---
+title: "Step 4: Perform Bayesian Analysis for SEEM3"
+author: "Caroline Ring and John Wambaugh"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r def_model_path}
+rm(list=ls())
+SEEMPATH <- "L:/Lab/NCCT_ExpoCast/ExpoCast2018/SEEM3/"
+#SEEMPATH <- "C:/users/jwambaug/SEEM3/"
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+MODEL.NAMES <- c("SHEDS.Direct", 
+                 "SHEDS.Indirect",
+                 "FINE",
+                 "Food.Contact",
+                 "REDS",
+                 "RAIDAR",
+                 "RAIDAR.ICE",
+                 "USETox.Pest",
+                 "USETox.Indust",
+                 "USETox.Res",
+                 "USETox.Diet",
+                 "Production.Volume",
+                 "Stockholm")
+NUM.MODELS <- length(MODEL.NAMES)
+
+PATHWAY.NAMES <- c("Diet",
+                   "Res",
+                   "Pest",
+                   "Indust")
+NUM.PATHWAYS <- length(PATHWAY.NAMES)
+
+NHANES.INFERENCES <- "NHANES-data-2018-06-05.Rdata"  
+NHANES.MEAN <- "NHANES-mean-2018-06-05.Rdata"
+NHANES.SD <- "NHANES-sd-2018-06-05.Rdata"
+TRAINING.DATA <- "training-chems-2018-06-04.RData"
+MODEL.TABLE <- "model.table-2018-06-04.txt"
+
+
+```
+
+## Setting up MCMC parameters for JAGS run
+```{r jags_setup}
+n.chains <- 6
+n.iter <- 4000
+thin <- 10
+n.adapt <- 20000
+BUGS.MODEL <- "seem-030418.jags"
+SIMPLE.BUGS.MODEL <- "simple-021618.bugs"
+#max.updates <- 5
+```
+
+Load some R packages for use later.
+```{r load_packages, message=FALSE, warning=FALSE}
+library(data.table)
+library(gdata)
+library(classInt)
+library(ggplot2)
+library(jagsUI)
+library(runjags)
+library(mvtnorm)
+library(GGally)
+library(RColorBrewer)
+library(httk)
+library(scales)
+library(gplots)
+library(grid)
+```
+ Multiple plot function
+
+ ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+ - cols:   Number of columns in layout
+ - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+
+ If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+ then plot 1 will go in the upper left, 2 will go in the upper right, and
+ 3 will go all the way across the bottom.
+
+```{r multiplot, message=FALSE, warning=FALSE}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL, widths=unit(rep_len(1, cols), "null")) {
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout),widths=widths)))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+Set a seed for reproducibility.
+```{r setseed}
+TeachingDemos::char2seed("Caroline Ring")
+```
+# Load NHANES data and model predictions   
+```{r load_NHANESobs}
+NHANES.obs <- readRDS(NHANES.INFERENCES)
+Nchem <- nrow(NHANES.obs)
+```
+
+# Setting up the JAGS model
+Take a look at the BUGS code I wrote to set up the Bayesian inference model. It made the most sense to me to loop over chemicals, then over pathways, then over models.
+
+In addition, at John Wambaugh's suggestion, the predicted deltas (probability that exposure occurs via each of the four pathways, represented by $\delta_i^j$) are now used as priors for the "true" deltas.
+
+```{r cat_bugs, comment=''}
+cat(readLines(BUGS.MODEL), sep="\n")
+```
+
+## Matrix of predicted/prior deltas
+With this structure, then, the prior on the deltas (probability that exposure occurs via each of the four pathways, represented by $\delta_i^j$) should be arranged in an $N_{chem} \times N_{path}$ array, where $N_{chem}$ is the number of chemicals and $N_{path}$ is the number of pathways.
+
+```{r make_delta_matrix}
+#To put this into JAGS:
+#arrange deltas into Nchems x Npath array
+delta.matrix <- as.matrix(NHANES.obs[, .SD,
+                                     .SDcols=paste("delta",
+                                                   PATHWAY.NAMES,
+                                                   "pred",
+                                                   sep=".")])
+rownames(delta.matrix) <- NHANES.obs[, dsstox_substance_id]
+delta.matrix[is.na(delta.matrix)] <- 0.5
+delta.matrix[delta.matrix==0] <- 0.001
+delta.matrix[delta.matrix==1] <- 0.999
+
+# delta.err.matrix <- as.matrix(NHANES.obs[, .SD,
+#                                      .SDcols=paste("delta",
+#                                                    PATHWAY.NAMES,
+#                                                    "OOB.err",
+#                                                    sep=".")])
+delta.err.matrix <- apply(delta.matrix,
+                          c(1,2),
+                          function(mu) mu*(1-mu)/5)
+rownames(delta.err.matrix) <- NHANES.obs[, dsstox_substance_id]
+colnames(delta.err.matrix) <- paste("delta",
+                                                   PATHWAY.NAMES,
+                                                   "OOB.err",
+                                                   sep=".")
+#delta.err.matrix[is.na(delta.err.matrix)] <- 0.5^2
+```
+
+# We want chemicals used in the training set to be either a positive or a negative:
+```{r load_known_deltas}
+load(TRAINING.DATA)
+delta.matrix.known <-matrix(NA,ncol=NUM.PATHWAYS,nrow=dim(NHANES.obs)[1])
+rownames(delta.matrix.known) <- NHANES.obs$dsstox_substance_id
+colnames(delta.matrix.known) <- PATHWAY.NAMES
+for (this.id in NHANES.obs$dsstox_substance_id)
+  for (this.path in PATHWAY.NAMES)
+  {
+    if(this.id %in% positives[[this.path]]) delta.matrix.known[regexpr(this.id,rownames(delta.matrix.known))!=-1,this.path]<-1
+    else if(this.id %in% negatives[[this.path]]) delta.matrix.known[regexpr(this.id,rownames(delta.matrix.known))!=-1,this.path]<-0
+  }
+saveRDS(delta.matrix.known,paste("known-deltas-",Sys.Date(),".RData",sep=""))
+  
+```
+
+## Matrix of model-predicted exposures
+Likewise, the model-predicted exposures should be arranged in an $N_{chem} \times N_{model}$ array, where $N_{model}$ is the number of models.
+```{r make_pred_matrix}
+#arrange model-predicted exposures into Nchem x Nmodel array
+pred.matrix <- as.matrix(NHANES.obs[, .SD,
+                                    .SDcols=paste("Pred",
+                                                  MODEL.NAMES,
+                                                  "log.scale",
+                                                  sep=".")])
+
+rownames(pred.matrix) <- NHANES.obs[, dsstox_substance_id]
+# If we don't have a prediciton (and delta for that model and pathway is 1) use the mean (which is zero for scaled numbers):
+pred.matrix[is.na(pred.matrix)] <- 0
+
+
+save(pred.matrix,file=paste("pred-matrix-",Sys.Date(),".RData",sep=""))
+```
+
+## Pathway-model matrix
+The SHEDS-HT Dietary model predicts exposure via the Dietary pathway; the SHEDS-HT Residential model predicts exposure via the Residential pathway; and the Pesticide Re-registration Documents model predicts exposure via the Pesticide pathway. The RAIDAR and USETox models both predict Pesticide and Industrial pathways. The production volume "model" predicts the production volume pathway.
+
+```{r pathmodel_matrix}
+pathmodel.matrix <- matrix(rep(0, NUM.MODELS*NUM.PATHWAYS),
+                           ncol=NUM.MODELS,
+                           nrow=NUM.PATHWAYS)
+rownames(pathmodel.matrix) <- PATHWAY.NAMES
+colnames(pathmodel.matrix) <- MODEL.NAMES
+pathmodel.matrix["Diet", c("Food.Contact","Production.Volume","USETox.Diet")] <- 1
+pathmodel.matrix["Res", c("SHEDS.Direct","SHEDS.Indirect","FINE","RAIDAR.ICE","USETox.Res","Production.Volume")] <- 1
+pathmodel.matrix["Pest", c("REDS", "RAIDAR", "USETox.Pest","Stockholm","Production.Volume")] <- 1
+pathmodel.matrix["Indust", c("RAIDAR", "USETox.Indust","Stockholm","Production.Volume")] <- 1
+NUM.NONZERO.WEIGHTS <- 0
+wpath <- NULL
+wmdl <- NULL
+for (this.path in 1:NUM.PATHWAYS)
+  for (this.mdl in 1:NUM.MODELS)
+{
+  if (pathmodel.matrix[this.path,this.mdl]==1)
+  {
+    NUM.NONZERO.WEIGHTS <- NUM.NONZERO.WEIGHTS + 1
+    wpath[NUM.NONZERO.WEIGHTS] <- this.path
+    wmdl[NUM.NONZERO.WEIGHTS] <- this.mdl
+  }
+  
+  }
+#wzeros <- pathmodel.matrix
+#wzeros[wzeros==1] <- NA
+print(pathmodel.matrix)
+save(PATHWAY.NAMES,MODEL.NAMES,NUM.NONZERO.WEIGHTS,wpath,wmdl,pathmodel.matrix,file=paste("pathmodel-",Sys.Date(),".RData",sep=""))
+```
+## Setting up hyperpriors
+Note that in the JAGS code, there are multivariate normal priors for the joint distributions of pathway means and model weights. The parameters of these priors are governed by two hyperpriors: the mean vectors by another multivariate normal distribution, and the covariance matrixes by an inverse Wishart distribution (actually, the precision matrixes by a Wishart distribution). In this case, I follow the advice given by Chung et al. in the paper "Weakly Informative Prior for Covariance Matrices" for the parameters of the Wishart hyperprior: "the degrees of freedom are set equal to the number of varying parameters plus 2, and the scale matrix is the identity matrix multiplied by a value that is large relative to the scale of the problem."
+```{r setup_hyperprior_omega}
+#pathway means
+omega_a_R <- solve(diag(rep(log(10), NUM.PATHWAYS))) 
+omega_a_k <- NUM.PATHWAYS+2
+#model weights
+omega_w_R <- solve(diag(rep(log(10), NUM.NONZERO.WEIGHTS)))
+omega_w_k <- NUM.NONZERO.WEIGHTS+2
+```
+
+For the multivariate normal hyperprior, I assume the mean vector is all zeros and the covariance matrix is likewise the identity matrix multiplied by a value that is large relative to the scale of the problem.
+```{r setup_hyperprior_mu}
+#pathway means
+mu_a_mu = rep(0, NUM.PATHWAYS)
+mu_a_omega = solve(diag(rep(log(10),
+                              NUM.PATHWAYS)))
+#model weights
+mu_w_mu = rep(0, NUM.NONZERO.WEIGHTS)
+mu_w_omega = solve(diag(rep(log(10),
+                              NUM.NONZERO.WEIGHTS)))
+```
+
+
+As JAGS input data, take the vector of log NHANES inferred exposures. Replace any values below LOD with NAs, so JAGS sees them as "missing". Do similarly with sigma, the NHANES inference uncertainties.
+```{r handle_belowLOD}
+logobs <- NHANES.obs$scaledlogmgpkgpday
+logobs[NHANES.obs$isAboveLOD==0] <- NA
+
+sigma <- NHANES.obs$scaledsigma
+sigma[NHANES.obs$isAboveLOD==0] <- NA
+
+logobs.mean <- readRDS(NHANES.MEAN)
+logobs.sd <- readRDS(NHANES.SD)
+
+save(logobs,logobs.mean,logobs.sd,sigma,file=paste("obs-",Sys.Date(),".RData",sep=""))
+
+```
+
+Set up alpha and beta for the delta p prior.
+
+```{r}
+alphafun <- function(mu, sig2) return(-mu*(sig2+mu^2-mu)/sig2)
+betafun <- function(mu,sig2) return((sig2+mu^2-mu)*(mu-1)/sig2)
+alpha.matrix <- matrix(mapply(alphafun,
+                   delta.matrix,
+                   delta.err.matrix/2),
+                   nrow=nrow(delta.matrix),
+                   ncol=ncol(delta.err.matrix))
+beta.matrix <- matrix(mapply(betafun,
+                   delta.matrix,
+                   delta.err.matrix/2),
+                   nrow=nrow(delta.matrix),
+                   ncol=ncol(delta.err.matrix))
+
+```
+# Prior deltas
+
+To compare the mean posterior deltas to the prior (predicted) deltas, I visualize them using heatmaps.
+
+First, I'll set up a function to make a nice smooth color gradient.
+
+```{r sequential_color, echo=FALSE, eval=TRUE}
+#Use a sequential color palette
+#Based on http://stackoverflow.com/a/10986203 by Josh O'Brien
+sequential.color <- function(data,pal_choice="YlGnBu"){
+  Min <- min(data,na.rm=TRUE)
+  Max <- max(data,na.rm=TRUE)
+  ncol <- brewer.pal.info[pal_choice, "maxcolors"]
+  pal<-RColorBrewer::brewer.pal(n=ncol,pal_choice)
+  #interpolate gradient between the first two colors
+  rc1<-colorRampPalette(colors=c(pal[1],pal[2]), space="Lab")(10) 
+  #interpolate gradient between each succeeding pair of colors
+  for(i in 2:(ncol-1)){
+    tmp<-colorRampPalette(colors=c(pal[i],pal[i+1]), space="Lab")(10) 
+    rc1<-c(rc1,tmp)
+    }
+  #calculate the data breaks
+  rampbreaks <- seq(Min, Max, length.out=10*(ncol-1)+1)
+  cuts <- classInt::classIntervals(data, style="fixed", fixedBreaks=rampbreaks)
+  return(list(cuts=cuts,rc1=rc1))
+  }
+```
+
+```{r diverge_color, eval=TRUE}
+#Use a diverging color palette
+#Based on http://stackoverflow.com/a/10986203 by Josh O'Brien
+diverge.color <- function(data,pal_choice="RdBu",Thresh=0.5, ngrad=10){
+  ncol <- RColorBrewer::brewer.pal.info[pal_choice, "maxcolors"]
+ #use ngrad*(ncol-1) colors total, and divide the data into ngrad*(ncol-1) bins
+  #so the halfway point is (ngrad*(ncol-1))/2
+  nHalf<-(ngrad*(ncol-1))/2 
+  Min <- min(data,na.rm=TRUE)
+  Max <- max(data,na.rm=TRUE)
+  ncol <- RColorBrewer::brewer.pal.info[pal_choice, "maxcolors"]
+  pal<-RColorBrewer::brewer.pal(n=ncol,pal_choice)
+  #interpolate gradient between the first two colors
+  rc1<-colorRampPalette(colors=c(pal[1],pal[2]), space="Lab")(ngrad) 
+  #interpolate gradient between each succeeding pair of colors
+  for(i in 2:(ncol-1)){
+    tmp<-colorRampPalette(colors=c(pal[i],pal[i+1]), space="Lab")(ngrad) 
+    rc1<-c(rc1,tmp)
+    }
+  #calculate the data breaks
+  rb1 <- seq(Min, Thresh, length.out=nHalf+1)
+  rb2 <- seq(Thresh, Max, length.out=nHalf+1)[-1]
+  rampbreaks <- c(rb1, rb2)
+  cuts <- classInt::classIntervals(data, style="fixed", fixedBreaks=rampbreaks)
+  return(list(cuts=cuts,rc1=rc1))
+  }
+```
+
+Then plot heatmaps using this color palette. Here, I'm only looking at the deltas for Dietary and Residential pathways; the delta priors for Pesticide and Industrial pathways were all either 0 or 1, so the posterior mean deltas for those pathways are still either 0 or 1. The interesting changes occur for the Dietary and Residential pathways, where the delta priors could be somewhere between 0 and 1 if predicted by random forest.
+
+```{r heatmap_delta_prior, fig.width=8, fig.height=8, eval=TRUE}
+delta.prior <- delta.matrix
+delta.prior[!is.na(delta.matrix.known)] <- delta.matrix.known[!is.na(delta.matrix.known)]
+colnames(delta.prior) <- PATHWAY.NAMES
+brks.prior <- diverge.color(data=delta.prior, Thresh=0.5)
+hm.prior <- gplots::heatmap.2(x=delta.prior,
+                  dendrogram="row",
+                  col=brks.prior$rc1,
+                  breaks=brks.prior$cuts[["brks"]],
+                  trace='none',
+                  denscol="black",
+                  margins=c(5, 7),
+                  main="Delta Priors",
+                  cexCol=1,
+                  cexRow=0.3,
+                  srtCol=40,
+                 adjCol=c(1,1))
+```
+
+```{r pdf_heatmap_delta_prior, echo=FALSE, results="hide", eval=TRUE}
+pdf(paste("delta_prior-",Sys.Date(),".pdf",sep=""), height=8, width=8)
+gplots::heatmap.2(x=delta.prior,
+                  dendrogram="row",
+                  col=brks.prior$rc1,
+                  breaks=brks.prior$cuts[["brks"]],
+                  trace='none',
+                  denscol="black",
+                  margins=c(5, 7),
+                  main="Delta Priors",
+                  cexCol=1,
+                  cexRow=0.3,
+                  srtCol=40,
+                 adjCol=c(1,1))
+dev.off()
+```
+
+## Initialization
+ In order to make the JAGS runs reproducible, I need to set up a function to choose the initial values of the parameters. Otherwise, JAGS will just choose them for each chain without using the random seed I've set.
+ 
+```{r jags_initfun}
+ initsfun <- function(omega_a_R, 
+                      omega_a_k,
+                     mu_a_mu, 
+                     mu_a_omega,
+                     omega_w_R, 
+                     omega_w_k,
+                     mu_w_mu, 
+                     mu_w_omega,
+                     a0_mu, 
+                     deltaprior, 
+                     deltaerr, 
+                     LOD, 
+                     isAboveLOD,
+                     alpha.matrix,
+                     beta.matrix,
+                     a0_sd,
+                     delta.matrix.known){
+  #initialize precision matrix for pathway means prior
+  omega_a <- rWishart(n=1, df=omega_a_k, Sigma=solve(omega_a_R))[,,1]
+  #initialize means vector for pathway means prior
+  mu_a <- as.vector(rmvnorm(n=1, mean=mu_a_mu, sigma=solve(mu_a_omega)))
+  #initialize precision matrix for model weights prior
+  omega_w <- rWishart(n=1, df=omega_w_k, Sigma=solve(omega_w_R))[,,1]
+  #initialize means vector for model weights prior
+  mu_w <- as.vector(rmvnorm(n=1, mean=mu_w_mu, sigma=solve(mu_w_omega)))
+  #initialize grand mean
+  a0 <- rnorm(n=1, mean=a0_mu, sd=a0_sd)
+  #initialize pathway means
+  a <- as.vector(rmvnorm(n=1, mean=mu_a, sigma=solve(omega_a)))
+  #initialize model weights
+  wvector <- as.vector(rmvnorm(n=1, mean=mu_w, sigma=solve(omega_w)))
+
+# Not needed if we manually curate all deltas
+    #initialize deltap and deltas (Nchem x Npath)
+#  deltap <- matrix(mapply(rbeta,
+#                   shape1=alpha.matrix,
+#                  shape2=beta.matrix,
+#                  MoreArgs=list("n"=1)),
+#                   nrow=nrow(alpha.matrix),
+#                   ncol=ncol(beta.matrix))
+#  delta <- apply(deltap,
+#                 c(1,2),
+#                         function(x) rbinom(n=1, size=1, prob=x))
+#  delta[!is.na(delta.matrix.known)] <- NA
+  #Initialize log observations below LOD
+  logobs <- rep(NA, length(LOD))
+  logobs[!isAboveLOD] <- sapply(LOD[!isAboveLOD],
+                             function(x) log(runif(n=1,
+                                               0,
+                                               x)))
+  #Initialize sigma for censored data (below LOD)
+  sigma <- rep(NA, length(LOD))
+  sigma[!isAboveLOD] <- runif(n=sum(!isAboveLOD),
+                                               1,
+                                               4)
+  sigma0 <- runif(1,1,4)
+  
+  return(list("omega_a"=omega_a,
+              "omega_w"=omega_w,
+              "mu_a"=mu_a,
+              "mu_w"=mu_w,
+              "a0"=a0,
+              "a"=a,
+             "wvector"=wvector,
+ #            "deltap" = deltap,
+#             "delta" = delta,
+             "logobs" = logobs,
+             "sigma" = sigma,
+             "sigma0" = sigma0))
+}
+
+```
+
+## Estimate individual model predictive ability
+
+Because the models are correlated, we want to calculate their correlation with the NHANES data on the individual basis.
+
+We will also plot the model predictions vs. NHANES inferred
+```{r setup_univariate_model_analysis, fig.width=11, fig.height=8.5, eval=TRUE}
+predict.table <- as.data.frame(matrix("",nrow=length(MODEL.NAMES),ncol=4),stringsAsFactors=F)
+rownames(predict.table) <- MODEL.NAMES
+colnames(predict.table) <- c("Pathway","Predicted Chemicals","Slope","R2")
+
+temp.NHANES <- NHANES.obs
+temp.NHANES$Pred.Stockholm.log <- temp.NHANES$Pred.Stockholm
+for (this.model in MODEL.NAMES)
+{
+  var.name <- paste("Pred",this.model,"log",sep=".")
+  set(temp.NHANES,which(is.infinite(temp.NHANES[[var.name]])),var.name,NA)
+  set(temp.NHANES,which(is.na(temp.NHANES[[var.name]])),var.name,mean(unlist(temp.NHANES[,eval(var.name),with=F]),na.rm=T))
+  var.name <- paste("Pred",this.model,"log.scale",sep=".")
+  set(temp.NHANES,which(is.infinite(temp.NHANES[[var.name]])),var.name,NA)
+  set(temp.NHANES,which(is.na(temp.NHANES[[var.name]])),var.name,0)
+}
+```
+```{r model_plot, fig.width=11, fig.height=8.5, eval=TRUE}
+p<-list()
+for (this.path in PATHWAY.NAMES)
+{
+  these.chems <- rownames(subset(delta.prior,delta.prior[,this.path]>0.8)) 
+  this.subset <- subset(temp.NHANES,dsstox_substance_id%in%these.chems)
+  these.models <- MODEL.NAMES[pathmodel.matrix[this.path,]==1]
+  tmp <- melt(this.subset[, .SD,
+                       .SDcols=c("CAS", 
+                                 "logmgpkgpday",
+                                 "log.lP.min",
+                                 "log.lP.max",
+                                 paste("Pred",
+                                       these.models,
+                                       "log",
+                                       sep="."))],
+            id.vars=c("CAS", "logmgpkgpday", "log.lP.min",
+                                 "log.lP.max"),
+            measure.vars=paste("Pred",
+                               these.models,
+                               "log",
+                               sep="."),
+            variable.name="Model",
+            value.name="Pred")
+tmp[, Model:=gsub(x=Model, pattern="Pred.", replacement="", fixed=TRUE)]
+tmp[, Model:=gsub(x=Model, pattern=".log", replacement="", fixed=TRUE)]
+tmp[, Model:=factor(Model, levels=these.models)]
+
+p[[this.path]] <- ggplot(data=tmp) +
+  geom_point(aes(y=logmgpkgpday, x=Pred, color=Model)) +
+  geom_linerange(aes(x=Pred, ymin=log.lP.min, ymax=log.lP.max, color=Model)) +
+  geom_smooth(aes(y=logmgpkgpday, x=Pred, color=Model), method="lm", se=FALSE) +
+  scale_color_brewer(palette="Set2") +
+  theme_bw() +
+  ylab("log NHANES inferred exposure") + 
+  xlab("log model predicted exposure") +
+  ggtitle(paste(this.path,"Pathway"))
+}
+
+pdf(paste("models_vs_nhanes-",Sys.Date(),".pdf",sep=""),width=11, height=8.5)
+multiplot(plotlist=p,cols=2)
+dev.off()
+multiplot(plotlist=p,cols=2)
+```
+```{r univariate_model_weights, fig.width=11, fig.height=8.5, eval=TRUE}
+ path.initsfun <- function(LOD, 
+                     isAboveLOD,
+                     a0.sd){
+  #initialize grand mean
+  a0 <- rnorm(n=1, mean=0, sd=a0.sd)
+  logobs <- rep(NA, length(LOD))
+  logobs[!isAboveLOD] <- sapply(LOD[!isAboveLOD],
+                             function(x) log(runif(n=1,
+                                               0,
+                                               x)))
+  #Initialize sigma for censored data (below LOD)
+  sigma <- rep(NA, length(LOD))
+  sigma[!isAboveLOD] <- runif(n=sum(!isAboveLOD),
+                                               1,
+                                               4)
+  sigma0 <- runif(1,1,4)
+  
+  outlist <-list("a0"=a0,
+             "sigma0" = sigma0)
+  if (any(!is.na(logobs))) outlist[["logobs"]] <- logobs
+  if (any(!is.na(sigma))) outlist[["sigma"]] <- sigma
+  
+  return(outlist)
+}
+
+univariate.table <- data.frame()
+for (this.path in PATHWAY.NAMES)
+{
+  these.chems <- rownames(subset(delta.prior,delta.prior[,this.path]>0.8)) 
+  these.models <- MODEL.NAMES[pathmodel.matrix[this.path,]==1]
+
+  for (this.model in these.models)
+  {
+    var.name <- paste("Pred",this.model,"log.scale",sep=".")
+ 
+    this.subset <- subset(temp.NHANES,dsstox_substance_id%in%these.chems)
+    this.subset <- subset(this.subset,!is.na(unlist(this.subset[,paste("Pred",this.model,sep="."),with=F])))
+    this.logobs <-   this.subset$scaledlogmgpkgpday
+    this.logobs[  this.subset$isAboveLOD==0] <- NA
+    this.sigma <-   this.subset$scaledsigma
+    this.sigma[  this.subset$isAboveLOD==0] <- NA
+    this.Nchem <- length(this.logobs)
+       
+    this.data=list("logobs" = this.logobs,
+                             "sigma" = this.sigma,
+                             "isAboveLOD" =   this.subset$isAboveLOD,
+                             "LOD" =   this.subset$lP.LOD,
+                             "pred" = unlist(this.subset[,var.name,with=F]),
+                             "Nchem" = this.Nchem,
+                             "a0_sd" = 5
+                              )
+    jags.output <- runjags::autorun.jags(model=SIMPLE.BUGS.MODEL,
+                                     monitor=c("a0", "cal"),
+                                     data=this.data,
+                             inits=function() path.initsfun(
+                                             LOD=this.subset$lP.LOD,
+                                             isAboveLOD=this.subset$isAboveLOD,
+                                             a0.sd=20),
+                             n.chains=n.chains,
+                             startburnin=n.iter/2,
+                             startsample=n.iter,
+                             adapt=n.adapt/20,
+                             summarise =TRUE,
+                             modules="glm",
+                             thin=1,
+                             thin.sample=T,
+                             max.time="2 d",
+                             method="rjags")
+   new.row <- data.frame(Pathway=this.path,
+                   Model=this.model,
+                   Evaluation.Chems=this.Nchem,
+                   Univariate=summary(jags.output)["cal","Median"],
+                   Lower95=summary(jags.output)["cal","Lower95"],
+                   Upper95=summary(jags.output)["cal","Upper95"],
+                   stringsAsFactors = F)
+   if (new.row$Lower95 >0 | new.row$Upper95<0) new.row$NonZero <- "Y"
+   else new.row$NonZero <- ""
+   univariate.table <- rbind(univariate.table,new.row)
+  }
+
+}
+knitr::kable(univariate.table)
+write.csv(univariate.table, paste("models-univariate-",Sys.Date(),".txt",sep=""))
+saveRDS(univariate.table, paste("models-univariate-",Sys.Date(),".RData",sep=""))
+```
+
+Run the model.
+
+```{r runjags_autojags}
+data=list("logobs" = logobs,
+                             "sigma" = sigma,
+                             "isAboveLOD" = NHANES.obs$isAboveLOD,
+                             "LOD" = NHANES.obs$lP.LOD,
+                            #  "alpha"=alpha.matrix,
+                            #"beta"=beta.matrix,
+                             "pred" = pred.matrix,
+                             "Nchem" = Nchem,
+                             "Npath" = NUM.PATHWAYS,
+                             #"Nmodel" = NUM.MODELS,
+                             "Nnonzerow" = NUM.NONZERO.WEIGHTS,
+                        #     "w" = wzeros,
+                             "wpath" = wpath,
+                             "wmdl" = wmdl,
+                             "mu_a_mu" = mu_a_mu,
+                             "mu_a_omega" = mu_a_omega,
+                             "omega_a_R"=omega_a_R,
+                             "omega_a_k" = omega_a_k,
+                             "mu_w_mu" = mu_w_mu,
+                             "mu_w_omega" = mu_w_omega,
+                             "omega_w_R"=omega_w_R,
+                             "omega_w_k" = omega_w_k,
+                             "a0_sd" = 5,
+                             "delta" = delta.matrix.known)
+save(data,file=paste("JAGS-data",Sys.Date(),".RData",sep=""))
+jags.output <- runjags::autorun.jags(model=BUGS.MODEL,
+                                     monitor=c("a0", "a", "wvector","sigma0"),
+                                     data=data,
+                             inits=function() initsfun(omega_a_R=omega_a_R,
+                                                  omega_a_k=omega_a_k,
+                                                  mu_a_mu=mu_a_mu,
+                                                  mu_a_omega=mu_a_omega, 
+                                                  omega_w_R=omega_w_R,
+                                                  omega_w_k=omega_w_k,
+                                                  mu_w_mu=mu_w_mu,
+                                                  mu_w_omega=mu_w_omega,
+                                                  a0_mu=0, 
+ #                                                 deltaprior=delta.matrix,
+                                             isAboveLOD=NHANES.obs$isAboveLOD,
+                                             LOD=NHANES.obs$lP.LOD,
+                                             alpha.matrix=alpha.matrix,
+                                             beta.matrix=beta.matrix,
+                                             a0_sd=5,
+                                             delta.matrix.known=delta.matrix.known),
+                             n.chains=n.chains,
+                             startburnin=n.iter*thin,
+                             startsample=n.iter,
+                             adapt=n.adapt,
+                             summarise =TRUE,
+                             modules="glm",
+                             thin=thin,
+                             thin.sample=T,
+                             max.time="2 d",
+                             method="rjags")
+saveRDS(jags.output, paste("jags_out-",Sys.Date(),"-1.RData",sep=""))
+jags.output <- runjags::extend.jags(jags.output,add.monitor=c("consensus","R2"))
+saveRDS(jags.output, paste("jags_out-",Sys.Date(),"-2.RData",sep=""))
+```	
+
+
+# Results
+
+## Summary statistics
+`jagsUI::autojags` returns a matrix of summary statistics.
+```{r summary_stats, eval=TRUE}
+jags.output <- add.summary(jags.output)
+saveRDS(jags.output, paste("jags_out-",Sys.Date(),"-3.RData",sep=""))
+sumstats <- jags.output$summary[[1]][grep(x=rownames(jags.output$summary[[1]]), 
+                         pattern="consensus", 
+                         invert=TRUE, 
+                         fixed=TRUE), ]
+rownames(sumstats) <- c("Grand Mean",
+                        paste("PathMean", PATHWAY.NAMES, sep="."),
+                        paste("Model.Weight", MODEL.NAMES[wmdl],PATHWAY.NAMES[wpath],sep="."),
+                        "sigma",
+#                        paste("summeans",1:Nchem,sep="."),
+#                        paste("sumweightedpreds",1:Nchem,sep="."),
+                        "R2")
+
+knitr::kable(sumstats,
+             digits=c(rep(3, 7), 4, 5, 1, 3))
+
+
+write.csv(sumstats,file=paste("MCMCSummary-",Sys.Date(),".txt",sep=""))
+```
+
+## Converting sample into a data.table for easier analysis
+For ease of use, I'll convert `samp` into a `data.table` object by reshaping the arrays. This will combine the four simultaneous chains into one larger sample.
+```{r convert_samp_dt, eval=TRUE}
+samp.dt <- data.table(a0=jags.output$mcmc[[1]][,"a0"])
+for (i in 2:n.chains) samp.dt <- rbind(samp.dt,data.table(a0=jags.output$mcmc[[i]][,"a0"]))
+
+tmp <- as.data.table(jags.output$mcmc[[1]][,regexpr("consensus",colnames(jags.output$mcmc[[1]]))==-1&regexpr("a\\[",colnames(jags.output$mcmc[[1]]))!=-1])
+
+for (i in 2:n.chains) tmp <- rbind(tmp,as.data.table(jags.output$mcmc[[i]][,regexpr("consensus",colnames(jags.output$mcmc[[1]]))==-1&regexpr("a\\[",colnames(jags.output$mcmc[[1]]))!=-1]))
+
+setnames(tmp, 
+         colnames(tmp), 
+         paste("PathMean", PATHWAY.NAMES, sep="."))
+samp.dt <- cbind(samp.dt, tmp)
+rm(tmp)
+tmp2 <- as.data.table(jags.output$mcmc[[1]][,regexpr("wvector\\[",colnames(jags.output$mcmc[[1]]))!=-1])
+for (i in 2:n.chains) tmp2 <- rbind(tmp2,as.data.table(jags.output$mcmc[[i]][,regexpr("w\\[",colnames(jags.output$mcmc[[1]]))!=-1]))
+
+setnames(tmp2, 
+         colnames(tmp2), 
+         paste("Model.Weight", MODEL.NAMES[wmdl],PATHWAY.NAMES[wpath],sep="."))
+samp.dt <- cbind(samp.dt, tmp2)
+rm(tmp2)
+samp.dt <- as.data.table(apply(samp.dt,2,as.numeric))
+samp.dt[, iteration:=1:nrow(samp.dt)]
+save(samp.dt,file=paste("MCMC-",Sys.Date(),".RData",sep=""))
+```
+
+
+# Evaluating SEEM with sampled parameters
+Set up a function to evaluate SEEM with given model parameters, deltas, aand model-predicted exposures.
+
+I'll also impute the mean model-predicted exposure value to any missing ones, as I did with `pred.matrix`.
+```{r nhanesobs_na_zero, eval=TRUE}
+preds <- as.data.table(jags.output$mcmc[[1]][,regexpr("consensus",colnames(jags.output$mcmc[[1]]))!=-1])
+
+for (i in 2:n.chains) preds <- rbind(preds,as.data.table(jags.output$mcmc[[i]][,regexpr("consensus",colnames(jags.output$mcmc[[1]]))!=-1]))
+
+
+lci <- function(y) quantile(y, 0.025, na.rm=TRUE)
+uci <- function(y) quantile(y, 0.975, na.rm=TRUE)
+
+NHANES.obs <- copy(NHANES.obs)
+#Merge in model-predicted values for each chemical
+NHANES.obs.mean <- readRDS(NHANES.MEAN) 
+NHANES.obs.sd <- readRDS(NHANES.SD)
+for (i in 1:dim(NHANES.obs)[1])
+{
+  
+  NHANES.obs[i,SEEM:=median(unlist(preds[,paste("consensus[",i,"]",sep=""),with=F]))*NHANES.obs.sd+NHANES.obs.mean]
+  NHANES.obs[i,SEEM.l95:=lci(unlist(preds[,paste("consensus[",i,"]",sep=""),with=F]))*NHANES.obs.sd+NHANES.obs.mean]
+  NHANES.obs[i,SEEM.u95:=uci(unlist(preds[,paste("consensus[",i,"]",sep=""),with=F]))*NHANES.obs.sd+NHANES.obs.mean]
+}
+```
+
+
+## SEEM-predicted vs. NHANES-inferred exposures for MCMC and MLE parameters
+Now, plot the SEEM predictions evaluated using MCMC-sampled parameters against the NHANES inferred exposures.
+```{r nhanes_mcmc_summary, eval=TRUE}
+NHANES.obs[,logmgpkgpday.LCI:=logmgpkgpday-1.96*sigma,by=CAS]
+NHANES.obs[,logmgpkgpday.UCI:=logmgpkgpday+1.96*sigma,by=CAS]
+NHANES.obs[,Pathway:=""]
+NHANES.obs[delta.matrix.known[,"Diet"]>0.8,Pathway:=paste(Pathway,"Dietary",sep=", ")]
+NHANES.obs[delta.matrix.known[,"Res"]>0.8,Pathway:=paste(Pathway,"Consumer",sep=", ")]
+NHANES.obs[delta.matrix.known[,"Pest"]>0.8,Pathway:=paste(Pathway,"Pesticide",sep=", ")]
+NHANES.obs[delta.matrix.known[,"Indust"]>0.8,Pathway:=paste(Pathway,"Industrial",sep=", ")]
+NHANES.obs[,Pathway:=substr(Pathway,3,nchar(Pathway))]
+NHANES.obs[Pathway=="",Pathway:="Unknown"]
+
+save(NHANES.obs,file=paste("NHANES.mcmc.summary-",Sys.Date(),".RData",sep=""))
+```
+
+To get an idea of what the correlations look like, let's do a linear model for the mean SEEM predictions over the MCMC sampled parameters (corresponding to the black dots in the figure above).
+```{r lm_mcmc, eval=TRUE}
+NHANES.obs$approxsigma <- NHANES.obs$sigma
+NHANES.obs[isAboveLOD==0,approxsigma := (log.lP.max-log.lP.LOD-2)/(qnorm(0.975)-qnorm(0.025))]
+NHANES.obs[approxsigma==0,approxsigma := (log.lP.LOD + 0.975-log.lP.LOD-0.025)/(qnorm(0.975)-qnorm(0.025))]
+
+lm.mcmc <- lm(data=NHANES.obs, logmgpkgpday~SEEM,weight=1/approxsigma^2)
+
+summary(lm.mcmc)
+
+weights <- 1/NHANES.obs$approxsigma^2
+weights <- weights/sum(weights)
+mean.data <- sum(weights*lm.mcmc$fitted.values/sum(weights))
+mss <- sum(weights*(lm.mcmc$fitted.values-mean.data)^2)
+rss <- sum(weights*lm.mcmc$residuals^2)
+# RMSE:
+RMSE <- sqrt(rss)
+# Rsquared
+Rsquared <- mss/(mss+rss)
+n <-114
+df.int <- 1
+rdf <- lm.mcmc$df.residual
+# Adjusted Rsquared
+Adj.Rsquared <- 1 - (1 - Rsquared) * ((n - df.int)/rdf)
+
+#Examine points with intake rates < 10-9:
+NHANESlow <- NHANES.obs$mgpkgpday<10^-9
+weights <- 1/NHANES.obs$approxsigma[NHANESlow]^2
+weights <- weights/sum(weights)
+mean.data <- sum(weights*lm.mcmc$fitted.values[NHANESlow]/sum(weights))
+mss <- sum(weights*(lm.mcmc$fitted.values[NHANESlow]-mean.data)^2)
+rss <- sum(weights*lm.mcmc$residuals[NHANESlow]^2)
+# RMSE:
+RMSE.low <- sqrt(rss)
+# Rsquared
+Rsquared.low <- mss/(mss+rss)
+
+#Examine points with intake rates > 10-9:
+NHANEShigh <- NHANES.obs$mgpkgpday>10^-9
+weights <- 1/NHANES.obs$approxsigma[NHANEShigh]^2
+weights <- weights/sum(weights)
+mean.data <- sum(weights*lm.mcmc$fitted.values[NHANEShigh]/sum(weights))
+mss <- sum(weights*(lm.mcmc$fitted.values[NHANEShigh]-mean.data)^2)
+rss <- sum(weights*lm.mcmc$residuals[NHANEShigh]^2)
+# RMSE:
+RMSE.high <- sqrt(rss)
+# Rsquared
+Rsquared.high <- mss/(mss+rss)
+
+```
+
+
+```{r plot_nhanes_mcmc_summary, fig.height=8.5, fig.width=11, eval=TRUE}
+scientific_10 <- function(x) {                                  
+  out <- gsub("1e", "10^", scientific_format()(x))              
+  out <- gsub("\\+","",out)                                     
+  out <- gsub("10\\^01","10",out)                               
+  out <- parse(text=gsub("10\\^00","1",out))                    
+}  
+
+Fig.Calibration <- ggplot(data=NHANES.obs) + 
+  geom_linerange(aes(x=exp(logmgpkgpday), ymin=exp(SEEM.l95), ymax=exp(SEEM.u95)),
+                 color="gray70", size=0.5) +
+geom_segment(aes(x = exp(logmgpkgpday.LCI), y = exp(SEEM), xend = exp(logmgpkgpday.UCI), yend = exp(SEEM)), color="gray70", size=0.5)+
+  geom_point(aes(x=exp(logmgpkgpday), y=exp(SEEM),color=Pathway,shape=Pathway), size=3) +
+  geom_smooth(aes(x=exp(logmgpkgpday), y=exp(SEEM)), color="black",
+              linetype=1, method="lm", size=0.6) +
+  geom_abline(slope=1, intercept=0, color="black", linetype=2) + theme_bw() +
+    scale_y_log10(label=scientific_10) + scale_x_log10(label=scientific_10)+
+  xlab("NHANES Inferred Intake Rate (mg/kg bw/day)") + ylab("Predicted Intake Rate (mg/kg bw/day)")+ 
+  scale_shape_manual(values = c(21,22,23,24,25,15,16,17,18,0,1,2,3,4,5,6))  +
+  annotate("text", x = exp(-35), y =100, label = as.character(paste("R^2 ==", signif(summary(lm.mcmc)$adj.r.square,3))),parse=T, hjust=0, size=8)+
+  annotate("text", x = exp(-35), y =10, label = as.character(paste("RMSE ==", signif(RMSE,3))),parse=T, hjust=0, size=8)+ 
+  guides(shape=guide_legend(title="Pathway(s)"),color=guide_legend(title="Pathway(s)"))+ 
+  theme(text = element_text(size = 16))
+#+  annotate("text", x = exp(-35), y = 3, label = paste("Root Mean Sq. Error =", signif((exp(mean(lm.mcmc$residuals^2)))^(1/2),3)),hjust=0, size=8)
+
+print(Fig.Calibration)
+ggsave(paste("predvsobs_mcmc-",Sys.Date(),".pdf",sep=""), Fig.Calibration,height=7, width=11)
+  
+```
+
+With the far-field (USETox and RAIDAR) and production volume models included, now the mean predictions of SEEM3 have a much stronger correlation with the NHANES inferred exposures.
+
+

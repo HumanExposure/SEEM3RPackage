@@ -1,0 +1,346 @@
+---
+title: "Step 2: Creation of Pathway Predictor Models for SEEM3"
+author: "Caroline Ring and John Wambaugh"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+The basic SEEM3 equation is a linear combination of model-predicted exposures from different pathways. That is:
+
+Exposure to chemical $i$ = 
+$$= a_0 + \sum_{j=1}^{Npath} \delta_i^j \times \left( a_j + \sum_{k=1}^{Nmodel} m_j^k \times w_k \times p_i^k \right)$$
+
+where 
+
+* $a_0$ represents a "grand mean" exposure over all chemicals; 
+* $N_{path}$ represents the number of pathways under consideration; 
+* $\delta_i^j$ represents the probability that exposure to chemical $i$ occurs via pathway $j$; 
+* $a_j$ represents the additional mean exposure via pathway $j$ over all chemicals (over and above the grand mean); 
+* $N_{model}$ represents the number of models under consideration; 
+* $m_j^k$ represents whether model $k$ models exposure via pathway $j$ or not (it is either 1 or 0); 
+* $w_k$ represents the weight of model $k$; and 
+* $p_i^k$ represents the exposure to chemical $i$ predicted by model $k$.
+
+SEEM currently considers three exposure models and four exposure pathways. 
+
+The models are:
+
+1. SHEDS-HT Nearfield Direct Pathway
+2. SHEDS-HT Nearfield Indirect Pathway
+3. FINE Nearfield Model
+4. Food Contact Chemical Migration Model
+5. Pesticide Reregistration Eligibility Documents
+6. RAIDAR (Far-Field)
+7. RAIDAR ICE (Near-Field)
+8. USETox Pesticide Scenario
+9. USETox Industrial Scenario
+10. USETox Residential Scenario
+11. USETox Dietary Scenario
+12. Production volume
+13. Stockholm Convention on POPs
+
+The pathways are:
+
+1. Dietary
+2. Near-field
+3. Far-field pesticide
+4. Far-field industrial 
+
+Models 1 and 7 corresponds to pathway 1, model 2 to pathway 2, and model 3 to pathway 3. Models 4 and 5 correspond to pathway 4, and model 6 to all four pathways.
+
+The data sets for predicting pathway relevance to chemcals are:
+
+Dietary: FDA CEDI list, known NHANES dietary compounds
+Near-Field: ExpoCast product deformulation list (Phillips, et al.), CPCPdb (Goldsmith et al.
+Far-field pesticde: ACTOR USEdb pesticide list, REDs
+Far-field industrial: ACTOR USEdb Industrial-No-Consumer-Use list
+
+The goal of this project is to use Bayesian methods to infer the pathway means ($a_j$) and model weights ($w_k$), given the pathway probabilities ($\delta_i^j$), the model predictions ($p_i^k$), and a matrix of 1's and 0's linking pathways to models ($m_j^k$), along with some "observed" total exposures (exposure rates inferred from NHANES biomonitoring data).
+
+For use later, let's define the number of pathways, the number of models, and the names of the pathways and models.
+
+```{r def_model_path}
+rm(list=ls())
+SEEMPATH <- "L:/Lab/NCCT_ExpoCast/ExpoCast2018/SEEM3/"
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+MODEL.NAMES <- c("SHEDS.Direct", 
+                 "SHEDS.Indirect",
+                 "FINE",
+                 "Food.Contact",
+                 "REDS",
+                 "RAIDAR",
+                 "RAIDAR.ICE",
+                 "USETox.Pest",
+                 "USETox.Indust",
+                 "USETox.Res",
+                 "USETox.Diet",
+                 "Production.Volume",
+                 "Stockholm")
+NUM.MODELS <- length(MODEL.NAMES)
+
+PATHWAY.NAMES <- c("Diet",
+                   "Res",
+                   "Pest",
+                   "Indust")
+NUM.PATHWAYS <- length(PATHWAY.NAMES)
+
+NUM.CORES <- 4
+CHEM.DESCRIPTORS <- "all-chems-2018-06-04.RData"
+DESCRIPTOR.NAMES <- "descriptor-names-2018-06-04.RData"
+TRAINING.CHEMS <- "training-chems-2018-06-04.RData"
+DESC.NAMES <- "descriptor-names-2018-06-04.RData"
+RF.DATE.USED <- Sys.Date()
+NUMBER.TREES <- 5000
+NHANES.ANNOTATION <- "SEEM3_bayes/NHANES-CPcat-Manual-022218.xlsx"
+
+```
+
+Load some R packages for use later.
+```{r load_packages, message=FALSE, warning=FALSE}
+library(data.table)
+library(randomForest)
+library(ggplot2)
+library(parallel)
+```
+
+Set a seed for reproducibility.
+```{r setseed}
+TeachingDemos::char2seed("Caroline Ring")
+```
+
+Load the chemical descriptors:
+```{r, eval=TRUE}
+all.chems <- readRDS(CHEM.DESCRIPTORS)
+load(DESCRIPTOR.NAMES)
+```
+
+# Deltas for pathways
+Based on the lists of positives and negatives for the pathways, we assign each chemical a TRUE (yes) or FALSE (no).
+
+```{r delta_pathways, eval=TRUE}
+load(TRAINING.CHEMS)
+all.chems[, delta.Diet:=NA]
+all.chems[, delta.Res:=NA]
+all.chems[, delta.Pest:=NA]
+all.chems[, delta.Indust:=NA]
+for (this.path in PATHWAY.NAMES)
+{
+  all.chems[dsstox_substance_id%in%positives[[this.path]], paste("delta.",this.path,sep=""):=TRUE]
+  all.chems[dsstox_substance_id%in%negatives[[this.path]], paste("delta.",this.path,sep=""):=FALSE]
+}
+```
+
+Scale and center all phys-chem.
+```{R scale and center}
+physchem.props<-physchem.props[physchem.props!="preferred_name"]
+for (this.col in physchem.props)
+{
+  m <- mean(unlist(all.chems[,this.col,with=F]),na.rm=T)
+  s <- sd(unlist(all.chems[,this.col,with=F]),na.rm=T)
+ #Use means where there is an NA:
+  all.chems[is.na(unlist(all.chems[,this.col,with=F])),this.col] <- m
+# Scale and center the phys-chem properties:
+  all.chems[,this.col] <- (unlist(all.chems[,this.col,with=F]) - m)/s
+}
+
+```
+
+Convert all the logical variables to factors, for random forest.
+
+```{r convert_logic_factor, eval=TRUE}
+logic.names <- names(all.chems)[all.chems[, sapply(.SD, is.logical)]]
+all.chems[, (logic.names):=lapply(.SD,
+                                  function(x) factor(x,
+                                                     levels=c(TRUE, FALSE))),
+          .SDcols=logic.names]
+```
+
+
+## Random forest predictions for deltas
+We can estimate deltas using a random forest prediction based on use categories and phys-chem properties.
+
+Set up the matrixes of data to use for the random forest predictions, and list the names of the predictor variables.
+```{r setup_rf_matrix, eval=TRUE}
+load(DESC.NAMES)
+rf_vars <- c(structure.desc, physchem.props)
+rf_vars <- rf_vars[!(rf_vars %in% c("COMMON.NAME","preferred_name"))]
+
+all.chems[, rftest:=Reduce(f=`&`, x=lapply(.SD, is.finite)), 
+        .SDcols=rf_vars]
+```
+
+Set up a general function to do the random forests for each pathway.
+```{r rf_path_general, eval=TRUE}
+rf_path <- function(pathname,
+                    all.chems,
+                    rf_vars,
+                    date,
+                    ntree=NUMBER.TREES){
+  print(paste("Random forest for", pathname))
+  deltaname <- paste("delta",
+                     pathname,
+                     sep=".")
+
+  data.set <- all.chems[is.finite(eval(parse(text=deltaname))) & 
+                                             rftest==TRUE, 
+                                           .SD, .SDcols=c(deltaname,rf_vars)]
+  numpos <- sum(data.set[,deltaname,
+                          with=FALSE][[deltaname]]==TRUE)
+  numneg <- sum(data.set[,deltaname,
+                          with=FALSE][[deltaname]]==FALSE)
+  numsamp <- min(numpos,numneg)
+  
+  delta.forest <- randomForest(y=data.set[,
+                                           deltaname,
+                                           with=FALSE][[deltaname]],
+                               x=data.set[,
+                                           .SD, .SDcols=rf_vars],
+                               na.action=na.omit,
+                               ntree=ntree,
+                               sampsize=c(numsamp,numsamp), #Balance the trees
+                               importance=TRUE)
+  saveRDS(delta.forest, 
+          paste("delta",
+                pathname,
+                "forest_noimpute-",date,".Rdata",
+                sep="_"))
+  delta.pred <- predict(object=delta.forest,
+                        newdata=all.chems[rftest==TRUE,
+                                          .SD, 
+                                          .SDcols=rf_vars],
+                        type="prob")
+  rownames(delta.pred) <- all.chems[rftest==TRUE, dsstox_substance_id]
+  
+  delta.pred <- data.table(delta.pred, keep.rownames=TRUE)
+  setnames(delta.pred, 
+           c("rn", "TRUE"),
+           c("dsstox_substance_id", paste("delta",
+                          pathname,
+                          "pred",
+                          sep=".")))
+  #Add OOB error rate
+  delta.pred[, (paste("delta",
+                      pathname,
+                      "OOB.err",
+                      sep=".")):=delta.forest$err.rate[ntree, "OOB"]]
+  return(delta.pred[, .SD,
+                    .SDcols=c("dsstox_substance_id",
+                               paste("delta",
+                          pathname,
+                          "pred",
+                          sep="."),
+                           paste("delta",
+                          pathname,
+                          "OOB.err",
+                          sep="."))])
+                    }
+```
+
+
+Next, actually do the random forest predictions for all pathways.
+
+```{r, eval=TRUE}
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+save.image(file=paste("delta-model-parallel-",Sys.Date(),".RData",sep=""))
+cl <-makeCluster(min(NUM.CORES,NUM.PATHWAYS))
+clusterCall(cl,setwd,paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+clusterCall(cl,load,paste("delta-model-parallel-",Sys.Date(),".RData",sep=""))
+clusterEvalQ(cl,library(data.table))
+clusterEvalQ(cl,library(randomForest))
+
+all.chems <- Reduce(function(y1,y2) merge(y1,y2,by="dsstox_substance_id", all=TRUE),
+                   parLapply(cl,PATHWAY.NAMES,
+                            rf_path,
+                           all.chems=all.chems,
+                           rf_vars=rf_vars,
+                           ntree=NUMBER.TREES,
+                           date=RF.DATE.USED),
+                   init=all.chems)
+stopCluster(cl)
+```
+Write out the chemical descriptors wtih pathway predictions added:
+
+```{r, eval=TRUE}
+all.chems<-subset(all.chems,!duplicated(all.chems))
+saveRDS(all.chems, paste("all-chems-deltas-",Sys.Date(),".Rdata",sep=""))
+```
+Summarize the RF performance
+
+```{r clean_reference_structurs, eval=TRUE}
+CPcat.manual <- read.xls(paste(SEEMPATH,NHANES.ANNOTATION,sep=""),stringsAsFactors=F)
+CPcat.manual[is.na(CPcat.manual)] <- ""
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+
+
+pathway.table <- as.data.frame(matrix("",nrow=length(PATHWAY.NAMES),ncol=8),stringsAsFactors=F)
+rownames(pathway.table) <- PATHWAY.NAMES
+colnames(pathway.table) <- c("NHANES Chemicals","Positives","Negatives","OOB Error Rate","Positives Error Rate","Balanced Accuracy","Sources of Positives","Sources of Negatives")
+for (this.pathway in PATHWAY.NAMES)
+{
+  pathway.table[this.pathway,"NHANES Chemicals"] <- dim(subset(CPcat.manual,CPcat.manual[,this.pathway]==1))[1]
+  this.RF <-   readRDS(paste("delta",
+                this.pathway,
+                "forest_noimpute-",RF.DATE.USED,".Rdata",
+                sep="_"))
+  deltaname <- paste("delta",
+                     this.pathway,
+                     sep=".")
+  deltas <- all.chems[is.finite(eval(parse(text=deltaname))) &
+                                             rftest==TRUE,
+                                           deltaname,
+                                           with=FALSE][[deltaname]]
+  P <- sum(as.numeric(deltas==TRUE)) 
+  pathway.table[this.pathway,"Positives"]<-P
+  N <- sum(as.numeric(deltas==FALSE))
+  pathway.table[this.pathway,"Negatives"]<-N
+  mean.errors <- apply(this.RF$err.rate,2,mean)
+  pathway.table[this.pathway,"OOB Error Rate"]<-signif(mean.errors["OOB"]*100,2)
+  confusion <- this.RF$confusion
+  TP <- confusion["TRUE","TRUE"]
+  pathway.table[this.pathway,"Positives Error Rate"]<-signif(confusion["TRUE","class.error"]*100,2)
+  TN <- confusion["FALSE","FALSE"]
+  BA <- (TP + TN) / (N + P)
+  pathway.table[this.pathway,"Balanced Accuracy"]<-signif(BA*100,2)
+  pathway.table[this.pathway,"Sources of Positives"] <- sources[this.pathway,"Positive"]
+  pathway.table[this.pathway,"Sources of Negatives"] <- sources[this.pathway,"Negative"]
+}
+rownames(pathway.table) <- c("Dietary","Near-Field","Far-Field Pesticide","Far Field Industrial")
+
+
+write.csv(pathway.table,file=paste("pathway.pred.table-",Sys.Date(),".txt",sep=""))
+knitr::kable(pathway.table)
+```
+
+```{r, eval=TRUE}
+important.vars <- NULL
+IMPORTANCE.CUTOFF <- 10
+
+for (this.pathway in PATHWAY.NAMES)
+{
+  this.RF <-   readRDS(paste("delta",
+                this.pathway,
+                "forest_noimpute-",RF.DATE.USED,".Rdata",
+                sep="_"))
+  important.vars <- unique(c(important.vars,rownames(subset(this.RF$importance,this.RF$importance[,"MeanDecreaseGini"]>IMPORTANCE.CUTOFF))))
+}
+
+importance.table <- as.data.frame(matrix(-99,nrow=length(important.vars),ncol=NUM.PATHWAYS),stringsAsFactors = F)
+rownames(importance.table) <- important.vars
+colnames(importance.table) <- PATHWAY.NAMES
+for (this.pathway in PATHWAY.NAMES)
+{
+  this.RF <-   readRDS(paste("delta",
+                this.pathway,
+                "forest_noimpute-",RF.DATE.USED,".Rdata",
+                sep="_"))
+  importance.table[important.vars,this.pathway] <- this.RF$importance[important.vars,"MeanDecreaseGini"]
+}
+
+colnames(importance.table) <- rownames(pathway.table)
+importance.table<-apply(importance.table,2,function(x) x/max(x))
+means <- sort(apply(importance.table,1,mean),decreasing=T)
+importance.table <- importance.table[names(means),]
+
+write.csv(importance.table,file=paste("pathway.pred.importance.table-",Sys.Date(),".txt",sep=""))
+knitr::kable(importance.table)
+
+```

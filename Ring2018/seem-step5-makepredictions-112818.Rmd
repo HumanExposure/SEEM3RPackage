@@ -1,0 +1,490 @@
+---
+title: "Step 5: Making Chemical Predictions With Seem3"
+author: "Caroline Ring and John Wambaugh"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r def_model_path}
+rm(list=ls())
+SEEMPATH <- "L:/Lab/NCCT_ExpoCast/ExpoCast2018/SEEM3/"
+#SEEMPATH <- "C:/users/jwambaug/SEEM3/"
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+MODEL.NAMES <- c("SHEDS.Direct", 
+                 "SHEDS.Indirect",
+                 "FINE",
+                 "Food.Contact",
+                 "REDS",
+                 "RAIDAR",
+                 "RAIDAR.ICE",
+                 "USETox.Pest",
+                 "USETox.Indust",
+                 "USETox.Res",
+                 "USETox.Diet",
+                 "Production.Volume",
+                 "Stockholm")
+NUM.MODELS <- length(MODEL.NAMES)
+
+PATHWAY.NAMES <- c("Diet",
+                   "Res",
+                   "Pest",
+                   "Indust")
+NUM.PATHWAYS <- length(PATHWAY.NAMES)
+
+TRAINING.DATA <- "training-chems-2018-06-04.RData"
+CHEMDATA <- "all-chems-deltas-2018-06-04.RData"
+
+
+# The exposure rates inferred from NHANES in Step 3:
+NHANES.INFERENCES <- "NHANES-data-2018-06-05.Rdata"    
+
+# The inferrences were scaled and centered in Step 3:
+NHANES.MEAN <- "NHANES-mean-2018-06-05.Rdata"
+NHANES.SD <- "NHANES-sd-2018-06-05.Rdata"
+
+# These were used to transform the model predictions in Step 3:
+MODEL.MEANS <- "model.means-2018-06-05.RData"
+MODEL.SDS <- "model.sds-2018-06-05.RData" 
+MODEL.MINS <- "model.mins-2018-06-05.RData"
+
+
+# The scaled predictors evaluated in Step 4:
+PRED.MATRIX <- "pred-matrix-2018-06-05.RData"
+
+# The mapping of models to pathways used in Step 4:
+PATHMODEL <- "pathmodel-2018-06-05.RData"
+
+# The resulse of the evaluation in Step 4:
+JAGS.OUTPUT <- "jags_out-2018-06-05-3.RData"
+MCMC.OUTPUT <- "MCMC-2018-06-05.RData"
+
+# The evaluation chemicals with Bayesian results appended (Step 4):
+NHANES.MCMC <- "NHANES.mcmc.summary-2018-06-05.RData"
+
+# Manually curated pathways used for the NHANES chemicals:
+KNOWN.DELTAS <- "known-deltas-2018-06-05.RData"
+
+# Number of samples to use from MCMC:
+NUM.DRAWS <- 500
+
+#Number of cores for parallel analysis:
+NUM.CORES <- 10
+
+```
+
+# Chemical Descriptors
+```{r chem_desc warning=FALSE, eval=TRUE}
+library(data.table)
+library(gdata)
+library(ggplot2)
+library(scales)
+library(parallel)
+library(grid)
+```
+ Multiple plot function
+
+ ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+ - cols:   Number of columns in layout
+ - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+
+ If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+ then plot 1 will go in the upper left, 2 will go in the upper right, and
+ 3 will go all the way across the bottom.
+
+```{r multiplot, message=FALSE, warning=FALSE}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL, widths=unit(rep_len(1, cols), "null")) {
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout),widths=widths)))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+```{r load_chemicals}
+# Read in the results of the delta predictor code:
+all.chems <- readRDS(CHEMDATA)
+all.chems <- subset(all.chems,!is.na(delta.Diet.pred)&!is.na(delta.Res.pred)&!is.na(delta.Pest.pred)&!is.na(delta.Indust.pred))
+
+all.chems <- all.chems[,c("dsstox_substance_id","CAS","Substance_Name",MODEL.NAMES,paste("delta",PATHWAY.NAMES,"pred",sep=".")),with=F]
+
+setnames(all.chems,
+         MODEL.NAMES,
+         paste("Pred",
+               MODEL.NAMES,
+               sep="."))
+
+```
+
+```{r load_known_deltas}
+NHANES.obs <- readRDS(NHANES.INFERENCES)
+delta.matrix.known <- readRDS(KNOWN.DELTAS)
+```
+# SEEM Summary Table
+```{r SEEM_table warning=FALSE, eval=TRUE}
+jags.output <- readRDS(JAGS.OUTPUT)
+
+for (this.path in colnames(delta.matrix.known))
+{
+  NHANES.obs[,paste("delta",this.path,"pred",sep="."):=delta.matrix.known[,this.path]]
+}
+
+load(PATHMODEL)
+PATHWAY.LABELS <- c("Grand Mean (Unexplained)","Dietary","Near-Field","Far-Field Pesticide","Far-Field Industrial")
+
+SIGFIGS <- 3
+summary.table <- as.data.frame(matrix("",nrow=1+length(PATHWAY.NAMES),ncol=3+length(MODEL.NAMES)),stringsAsFactors=F)
+rownames(summary.table) <- PATHWAY.LABELS
+colnames(summary.table) <- c("Pathway Mean","NHANES Chemicals","All Chemicals",MODEL.NAMES)
+summary.table[PATHWAY.LABELS[1],"Pathway Mean"] <- paste(signif(jags.output$summary$statistics["a0","Mean"],SIGFIGS)," (",signif(jags.output$summary$statistics["a0","SD"],SIGFIGS),")",sep="")
+for (i in 1:length(PATHWAY.NAMES))
+{
+  summary.table[PATHWAY.LABELS[1+i],"Pathway Mean"] <- paste(signif(jags.output$summary$statistics[paste("a[",i,"]",sep=""),"Mean"],SIGFIGS)," (",signif(jags.output$summary$statistics[paste("a[",i,"]",sep=""),"SD"],SIGFIGS),")",sep="")
+  summary.table[PATHWAY.LABELS[1+i],"NHANES Chemicals"] <- sum(delta.matrix.known[,PATHWAY.NAMES[i]]) 
+  summary.table[PATHWAY.LABELS[1+i],"All Chemicals"] <- paste(signif(sum(as.numeric(all.chems[,paste("delta",PATHWAY.NAMES[i],"pred",sep="."),with=F]>0.8))/dim(all.chems)[1],3)*100,"\\%",sep="")
+
+}
+summary.table["Grand Mean (Unexplained)","All Chemicals"] <- 
+  paste(signif(sum(as.numeric(apply(all.chems[,paste("delta",PATHWAY.NAMES,"pred",sep="."),with=F]<0.8,1,all)))/dim(all.chems)[1],3)*100,"\\%",sep="")
+unknown.chems <- 0
+for (i in 1:dim(NHANES.obs)[1])
+{
+  unknown <- 0
+  for (j in 1:length(PATHWAY.NAMES))
+  {
+    if (NHANES.obs[i,paste("delta",PATHWAY.NAMES[j],"pred",sep="."),with=F]>0.8) unknown <- unknown + 1
+  }  
+  if (unknown == 0) unknown.chems <- unknown.chems + 1
+}
+summary.table["Grand Mean (Unexplained)","NHANES Chemicals"] <-unknown.chems
+
+for (i in 1:NUM.NONZERO.WEIGHTS)
+  summary.table[wpath[i]+1,wmdl[i]+3] <- paste(signif(jags.output$summary$statistics[paste("wvector[",i,"]",sep=""),"Mean"],SIGFIGS)," (",signif(jags.output$summary$statistics[paste("wvector[",i,"]",sep=""),"SD"],SIGFIGS),")",sep="")
+
+write.csv(t(summary.table),file=paste("summary.table-",Sys.Date(),".txt",sep=""))
+knitr::kable(summary.table)
+```
+```{r SEEMpredictior}
+deltas <- paste("delta",PATHWAY.NAMES,"pred",sep=".")
+preds <- paste("Pred",MODEL.NAMES,"log.scale",sep=".")
+
+
+fast_seem <- function(x)
+{
+  delta.vec <- unlist(chem.preds[dsstox_substance_id==x,deltas,with=F])
+  names(delta.vec) <- PATHWAY.NAMES
+  # replicate predictions based on number of times they occur in each pathway:
+  pred.vec <- unlist(chem.preds[dsstox_substance_id==x,preds,with=F])[wmdl]
+  chem.delta.draws <- matrix(NA,nrow=NUM.DRAWS,ncol=NUM.PATHWAYS)
+  colnames(chem.delta.draws) <- PATHWAY.NAMES
+  for (i in PATHWAY.NAMES)
+  {
+    chem.delta.draws[,i] <- rbinom(NUM.DRAWS,1,delta.vec[i])
+  }
+ # weightedpreds <- (chem.delta.draws[,wpath]*sub.samp[,(2+NUM.PATHWAYS):(1+NUM.PATHWAYS+NUM.NONZERO.WEIGHTS)])%*%pred.vec
+  means <- apply(chem.delta.draws*sub.samp[,2:(1+NUM.PATHWAYS)],1,sum)
+  weightedpreds <-as.matrix(chem.delta.draws[,wpath]*sub.samp[,(2+NUM.PATHWAYS):(1+NUM.PATHWAYS+NUM.NONZERO.WEIGHTS)])%*%pred.vec
+  return(sub.samp[,1]+means+weightedpreds)
+}
+
+
+
+```
+# Predictions for All Chemicals
+```{r}
+load(MCMC.OUTPUT)
+#load(EVAL.SEEM)
+load(PRED.MATRIX)
+#load(OBS)
+
+set.seed(123456)
+these.iter <- sample(1:dim(samp.dt)[1],NUM.DRAWS)
+sub.samp <- samp.dt[these.iter]
+sub.samp[,iteration:=NULL]
+sub.samp <- as.matrix(sub.samp)
+model.mins <- readRDS(MODEL.MINS)
+
+model.means <- readRDS(MODEL.MEANS)
+model.sds <- readRDS(MODEL.SDS) 
+
+#Temporarily reduce the size of the chemical list:
+#a <- NULL
+#for (this.row in 1:dim(NHANES.obs)[1])
+#  a<-rbind(a,subset(all.chems,dsstox_substance_id==NHANES.obs[this.row,dsstox_substance_id]))
+           
+
+a <- all.chems
+for (this.model in MODEL.NAMES)
+{
+  scalenm <- paste("Pred",this.model,"log",sep=".")
+  colnm <- paste("Pred",this.model,"log.scale",sep=".")
+  a[,eval(colnm):=(log(as.numeric(unlist(a[,paste("Pred",this.model,sep="."),with=F])))-model.means[scalenm])/model.sds[scalenm]]
+  a[is.na(unlist(a[,colnm,with=F])),colnm] <- 0
+  if (any(unlist(a[,colnm,with=F])==-Inf))
+  {
+    a[unlist(a[,colnm,with=F])==-Inf,colnm] <- model.mins[colnm]
+  }
+}
+a[,Pred.Stockholm.log.scale:=Pred.Stockholm]
+
+
+chem.preds <- a
+
+known.delta.matrix <- readRDS(KNOWN.DELTAS)
+for (this.chem in rownames(known.delta.matrix))
+  for (this.path in colnames(known.delta.matrix))
+    chem.preds[dsstox_substance_id==this.chem,paste("delta",this.path,"pred",sep="."):=known.delta.matrix[this.chem,this.path]]
+
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+cl <-makeCluster(NUM.CORES)
+clusterCall(cl,setwd,paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+clusterSetRNGStream(cl, 123456)
+clusterExport(cl,c("fast_seem","chem.preds","PATHWAY.NAMES","MODEL.NAMES","NUM.MODELS","NUM.DRAWS","NUM.PATHWAYS","sub.samp","deltas","preds","wmdl","wpath","NUM.NONZERO.WEIGHTS"))
+clusterEvalQ(cl,library(data.table))
+
+
+#seem.preds <-  matrix(unlist(lapply(as.list(chem.preds$dsstox_substance_id), function(x) quantile(unlist(fast_seem(x)),c(0.5,0.025,0.975)))),ncol=3,byrow=T)
+seem.preds <-  matrix(unlist(parLapply(cl,as.list(chem.preds$dsstox_substance_id), function(x) quantile(unlist(fast_seem(x)),c(0.5,0.025,0.975)))),ncol=3,byrow=T)
+stopCluster(cl)
+save(seem.preds,file=paste("seem-preds-",Sys.Date(),".RData",sep=""))
+#Convert back to the mg/kg/day scale:
+nhanes.mean <- readRDS(NHANES.MEAN)
+nhanes.sd <- readRDS(NHANES.SD) 
+seem.preds <- seem.preds*nhanes.sd+nhanes.mean
+
+chem.preds[,seem3:=exp(seem.preds[,1])]
+chem.preds[,seem3.l95:=exp(seem.preds[,2])]
+chem.preds[,seem3.u95:=exp(seem.preds[,3])]
+
+
+
+
+
+save(chem.preds,file=paste("chem.preds-",Sys.Date(),".RData",sep=""))
+```
+#Here we compare the values predicted using faat_seem with the values calculated by JAGS:
+```{r check_fast_seem, eval=TRUE}
+load(NHANES.MCMC)
+NHANES.obs <- merge(NHANES.obs,chem.preds,by="dsstox_substance_id",all.x=T)
+scientific_10 <- function(x) {                                  
+  out <- gsub("1e", "10^", scientific_format()(x))              
+  out <- gsub("\\+","",out)                                     
+  out <- gsub("10\\^01","10",out)                               
+  out <- parse(text=gsub("10\\^00","1",out))                    
+} 
+Fig.fastseemcheck <- ggplot(data=NHANES.obs) + 
+  geom_linerange(aes(x=seem3, ymin=exp(SEEM.l95), ymax=exp(SEEM.u95)),
+                 color="gray70", size=0.5) +
+geom_segment(aes(x = seem3.l95, y = exp(SEEM), xend = seem3.u95, yend = exp(SEEM)), color="gray70", size=0.5)+
+  geom_point(aes(x=seem3, y=exp(SEEM),color=Pathway,shape=Pathway), size=3) +
+#  geom_smooth(aes(x=exp(seem3), y=exp(SEEM)), color="black",
+#              linetype=1, method="lm", size=0.6) +
+  geom_abline(slope=1, intercept=0, color="black", linetype=2) + theme_bw() +
+    scale_y_log10(label=scientific_10) + scale_x_log10(label=scientific_10)+
+  xlab("Fast_Seem Calculation (mg/kg bw/day)") + ylab("JAGS Model (mg/kg bw/day)")+ 
+  scale_shape_manual(values = c(21,22,2,15,16,17,18,23,24,25,20,19,14))
+
+print(Fig.fastseemcheck)
+
+
+```
+```{r nhanes_mcmc_summary, eval=TRUE}
+chem.preds[,Pathway:=""]
+chem.preds[delta.Diet.pred>0.5,Pathway:=paste(Pathway,"Dietary",sep=", ")]
+chem.preds[delta.Res.pred>0.5,Pathway:=paste(Pathway,"Consumer",sep=", ")]
+chem.preds[delta.Pest.pred>0.5,Pathway:=paste(Pathway,"Pesticide",sep=", ")]
+chem.preds[delta.Indust.pred>0.5,Pathway:=paste(Pathway,"Industrial",sep=", ")]
+chem.preds[,Pathway:=substr(Pathway,3,nchar(Pathway))]
+chem.preds[Pathway=="",Pathway:="Unknown"]
+chem.preds[Pathway=="Dietary, Consumer, Pesticide, Industrial",Pathway:="All Four"]
+chem.preds[regexpr(",",Pathway)!=-1,Pathway:=gsub("Consumer","Cons.",gsub("Industrial","Ind.",gsub("Dietary","Diet.",gsub("Pesticide","Pest.",Pathway))))]
+
+chem.preds[,AD:=1]
+chem.preds[delta.Diet.pred<=0.5 &
+           delta.Res.pred<=0.5 &
+           delta.Pest.pred<=0.5 &
+          delta.Indust.pred<=0.5,AD:=0]
+chem.preds[delta.Diet.pred<=0.5 &
+           delta.Res.pred<=0.5 &
+           delta.Pest.pred<=0.5 &
+          delta.Indust.pred<=0.5,seem3.u95:=NA]
+chem.preds[,Rank:=NA]
+chem.preds[AD==1,Rank:=1+dim(subset(chem.preds,AD==1))[1]-rank(seem3.u95)]
+
+
+save(chem.preds,file=paste("chem.preds.summary-",Sys.Date(),".RData",sep=""))
+write.csv(chem.preds,row.names=F,file=paste("SupTable-all.chem.preds-",Sys.Date(),".txt",sep=""))
+```
+```{r new_supplemental_nhanes_table, eval=TRUE}
+new.NHANES.table <- subset(chem.preds,dsstox_substance_id%in%NHANES.obs$dsstox_substance_id)
+new.NHANES.table[,colnames(sub.samp):=as.list(apply(sub.samp,2,median))]
+new.NHANES.table[,SEEM.example.Diet:=delta.Diet.pred*(PathMean.Diet+
+                                                        Model.Weight.Food.Contact.Diet*Pred.Food.Contact.log.scale +
+                                                        Model.Weight.USETox.Diet.Diet*Pred.USETox.Diet.log.scale +
+                                                        Model.Weight.Production.Volume.Diet*Pred.Production.Volume.log.scale )]
+new.NHANES.table[,SEEM.example.Res:=delta.Res.pred*(PathMean.Res+
+                                                        Model.Weight.SHEDS.Direct.Res*Pred.SHEDS.Direct.log.scale +
+                                                        Model.Weight.SHEDS.Indirect.Res*Pred.SHEDS.Indirect.log.scale +
+                                                        Model.Weight.FINE.Res*Pred.FINE.log.scale +
+                                                        Model.Weight.RAIDAR.ICE.Res*Pred.RAIDAR.ICE.log.scale +
+                                                        Model.Weight.USETox.Res.Res*Pred.USETox.Res.log.scale +
+                                                        Model.Weight.Production.Volume.Res*Pred.Production.Volume.log.scale)]
+new.NHANES.table[,SEEM.example.Pest:=delta.Pest.pred*(PathMean.Pest+
+                                                        Model.Weight.REDS.Pest*Pred.REDS.log.scale +
+                                                        Model.Weight.RAIDAR.Pest*Pred.RAIDAR.log.scale +
+                                                        Model.Weight.USETox.Pest.Pest*Pred.USETox.Pest.log.scale +
+                                                        Model.Weight.Stockholm.Pest* +
+                                                        Model.Weight.Production.Volume.Pest*Pred.Production.Volume.log.scale)]
+new.NHANES.table[,SEEM.example.Indust:=delta.Indust.pred*(PathMean.Indust+
+                                                        Model.Weight.RAIDAR.Indust*Pred.RAIDAR.log.scale +
+                                                        Model.Weight.USETox.Indust.Indust*Pred.USETox.Indust.log.scale +
+                                                        Model.Weight.Stockholm.Indust* +
+                                                        Model.Weight.Production.Volume.Indust*Pred.Production.Volume.log.scale)]
+
+new.NHANES.table[,SEEM.example.total:=a0+SEEM.example.Diet+SEEM.example.Res+SEEM.example.Pest+SEEM.example.Indust]
+new.NHANES.table[,NHANES.mean:=nhanes.mean]
+new.NHANES.table[,NHANES.sd:=nhanes.sd]
+new.NHANES.table[,SEEM.example.mgkgday.log:=SEEM.example.total*NHANES.sd+NHANES.mean]
+new.NHANES.table[,SEEM.example.mgkgday:=exp(SEEM.example.mgkgday.log)]
+
+old.NHANES.table <- read.csv("NHANES.obs.table-2018-06-05.txt",stringsAsFactors=F)
+
+write.csv(merge(old.NHANES.table[,1:8],new.NHANES.table,by=c("Substance_Name","CAS")),row.names=F,file=paste("SupTable-NHANESwithExamples-",Sys.Date(),".txt",sep=""))
+```
+```{r make_fig_four, eval=TRUE}
+
+scientific_10.2 <- function(x) {
+  out <- gsub("e", "%*%10^", scientific_format()(x))              
+  out <- gsub("\\+","",out)                                     
+  out <- gsub("10\\^01","10",out)   
+  out <- gsub("0\\%\\*\\%10\\^00","10^03",out)  
+  out <- parse(text=gsub("10\\^00","1",out))                    
+} 
+chem.preds.bars <- subset(chem.preds,AD==1)
+chem.preds.bars$Pathway <- factor(chem.preds.bars$Pathway)
+chem.preds.bars$seem3.u95 <- sapply(chem.preds.bars$seem3.u95,function(x) min(x,0.5*10^5))
+
+chem.preds.bars$seem3.l95 <- sapply(chem.preds.bars$seem3.l95,function(x) max(x,2*10^-11))
+# Above 0.1 mg/kg/day:
+abovep1 <- dim(subset(chem.preds,seem3.u95>10^-1))[1]
+
+seem.fig <- list()
+seem.fig[[1]] <- ggplot(data=chem.preds.bars) + 
+  geom_linerange(aes(x=Rank, ymin=seem3.l95, ymax=seem3.u95),
+                 color="gray70", size=0.5) +
+  geom_point(aes(x=Rank, y=seem3,color=Pathway,shape=Pathway), size=3)+ 
+  theme_bw() +
+  scale_y_log10(label=scientific_10,limits=c(10^-11,10^5)) + 
+  scale_x_log10(label=scientific_10,limits=c(1,abovep1))+
+  xlab("Chemical Rank") + ylab("Population Median Intake Rate (mg/kg bw/day)")+ 
+  scale_shape_manual(values = c(21,22,23,24,25,15,16,17,18,0,1,2,3,4,5,6))+
+  theme(text = element_text(size = 16))+
+  guides(shape=guide_legend(title="Pathway(s)"),color=guide_legend(title="Pathway(s)"))+ 
+  theme(legend.text=element_text(size=10))+ annotate(geom="text",x=100,y=5*10^3,label=paste(abovep1,"chemicals\n>0.1 mg/kg bw/day"),size=6)+
+  annotate(geom="text",x=1.1,y=10^4,label="a",size=8)
+
+write.csv(subset(chem.preds,AD==1&seem3.u95>10^-1),row.names=F,file=paste("SupTable-high.chem.preds-",Sys.Date(),".txt",sep=""))
+  
+seem.fig[[2]] <- ggplot(data=chem.preds.bars) + 
+  geom_linerange(aes(x=Rank, ymin=seem3.l95, ymax=seem3.u95),
+                 color="gray70", size=0.5) +
+#  geom_point(aes(x=Rank, y=exp(seem3),color=Pathway,shape=Pathway), size=3) +
+  theme_bw() +
+  geom_hline(yintercept=10^-1,linetype="longdash")+
+  annotate(geom="text",x=250000,y=5*10^-1,label=paste(dim(subset(chem.preds,seem3.u95<10^-1))[1],"chemicals\n<0.1 mg/kg bw/day"),size=6)+
+  geom_hline(yintercept=10^-3,linetype="dotdash")+
+  annotate(geom="text",x=250000,y=5*10^-3,label=paste(dim(subset(chem.preds,seem3.u95<10^-3))[1],"chemicals\n<1 µg/kg bw/day"),size=6)+
+    scale_y_log10(label=scientific_10,limits=c(10^-11,10^5)) + 
+  scale_x_continuous(limits=c((abovep1+1),dim(subset(chem.preds,AD==1))[1]),label=scientific_10.2)+
+  xlab("Chemical Rank") + ylab("Population Median Intake Rate (mg/kg bw/day)")+ 
+  theme(text = element_text(size = 16))+
+  annotate(geom="text",x=25000,y=10^4,label="b",size=8)
+
+#multiplot(plotlist=seem.fig,cols=2)  
+pdf(paste("seem3-predictions-",Sys.Date(),".pdf",sep=""),width=11, height=8.5)
+multiplot(plotlist=seem.fig,cols=2,widths=c(1.5,1))  
+dev.off()
+# Below 0.001 mg/kg/day:
+dim(subset(chem.preds,seem3.u95<10^-3))[1]
+# Below 0.1 mg/kg/day:
+dim(subset(chem.preds,seem3.u95<10^-1))[1]
+#Characterize the uncertainty:
+PanelACI <- log10(subset(chem.preds,seem3.u95>10^-1)$seem3.u95)-log10(subset(chem.preds,seem3.u95>10^-1)$seem3.l95)
+median(PanelACI)
+max(PanelACI)
+min(PanelACI)
+PanelBCI <- log10(subset(chem.preds,seem3.u95<10^-1)$seem3.u95)-log10(subset(chem.preds,seem3.u95<10^-1)$seem3.l95)
+median(PanelBCI)
+max(PanelBCI)
+min(PanelBCI)
+```
+
+# Model Summary Table
+```{r model_table warning=FALSE, eval=TRUE}
+a0 <- exp(-.528*nhanes.sd+nhanes.mean)
+a0plusdiet <- exp((-.528+0.707)*nhanes.sd+nhanes.mean)
+a0plusres <- exp((-.528+1.02)*nhanes.sd+nhanes.mean)
+a0pluspest <- exp((-.528+0.572)*nhanes.sd+nhanes.mean)
+a0plusindust <- exp((-.528-0.0788)*nhanes.sd+nhanes.mean)
+a0plusstockholmpest <- exp((-.528-1.52)*nhanes.sd+nhanes.mean)
+a0plusstockholmindust <- exp((-.528-1.75)*nhanes.sd+nhanes.mean)
+
+
+
+```
+
+```{r TSCAAnalysis, eval=TRUE}
+TSCA <- read.xls("L:/Lab/NCCT_ExpoCast/ExpoCast2018/TSCA-Fire-Drill/TSCAFullInventory-2018-10-05.xls",stringsAsFactors=F)
+chem.preds <- subset(chem.preds,dsstox_substance_id%in%TSCA$DTXSID)
+PanelACI <- log10(subset(chem.preds,seem3.u95>10^-1)$seem3.u95)-log10(subset(chem.preds,seem3.u95>10^-1)$seem3.l95)
+length(PanelACI)
+median(PanelACI)
+max(PanelACI)
+min(PanelACI)
+PanelBCI <- log10(subset(chem.preds,seem3.u95<10^-1)$seem3.u95)-log10(subset(chem.preds,seem3.u95<10^-1)$seem3.l95)
+length(PanelBCI)
+median(PanelBCI)
+max(PanelBCI)
+min(PanelBCI)
+chem.preds <- subset(chem.preds,Pathway!="Unknown")
+dim(subset(chem.preds,Pathway!="Unknown"&seem3.u95>10^-1))
+dim(subset(chem.preds,Pathway!="Unknown"&seem3.u95<10^-1))
+PanelACI <- log10(subset(chem.preds,seem3.u95>10^-1)$seem3.u95)-log10(subset(chem.preds,seem3.u95>10^-1)$seem3.l95)
+length(PanelACI)
+median(PanelACI)
+max(PanelACI)
+min(PanelACI)
+PanelBCI <- log10(subset(chem.preds,seem3.u95<10^-1)$seem3.u95)-log10(subset(chem.preds,seem3.u95<10^-1)$seem3.l95)
+length(PanelBCI)
+median(PanelBCI)
+max(PanelBCI)
+min(PanelBCI)
+
+```

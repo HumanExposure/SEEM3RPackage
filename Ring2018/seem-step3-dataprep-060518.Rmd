@@ -1,0 +1,413 @@
+---
+title: "Step 3: Organizing the Biomonitoring Data for Bayesian Analysis"
+author: "Caroline Ring and John Wambaugh"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+Let's define the number of pathways, the number of models, and the names of the pathways and models.
+
+```{r def_model_path}
+rm(list=ls())
+SEEMPATH <- "L:/Lab/NCCT_ExpoCast/ExpoCast2018/SEEM3/"
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+MODEL.NAMES <- c("SHEDS.Direct", 
+                 "SHEDS.Indirect",
+                 "FINE",
+                 "Food.Contact",
+                 "REDS",
+                 "RAIDAR",
+                 "RAIDAR.ICE",
+                 "USETox.Pest",
+                 "USETox.Indust",
+                 "USETox.Res",
+                 "USETox.Diet",
+                 "Production.Volume",
+                 "Stockholm")
+NUM.MODELS <- length(MODEL.NAMES)
+
+PATHWAY.NAMES <- c("Diet",
+                   "Res",
+                   "Pest",
+                   "Indust")
+NUM.PATHWAYS <- length(PATHWAY.NAMES)
+CHEMDATA <- "all-chems-deltas-2018-06-04.RData"
+TRAINING.DATA <- "training-chems-2018-06-04.RData"
+
+```
+# Load necessary packages:
+```{r load_packages, eval=TRUE}
+library(data.table)
+library(gdata)
+library(httk)
+library(ggplot2)
+library(scales)
+```
+# NHANES inferred exposures
+There are two sources for inferred exposures from NHANES biomonitoring data: urine biomonitoring and serum biomonitoring.
+
+
+## Serum biomonitoring
+Here, exposures are inferred by first reading in NHANES serum concentrations. These concentrations are assumed to be at steady state, and exposure rates are estimated simply using the first-order clearance rate estimated by HTTK.
+```{r load_TK_data, warning=FALSE, eval=TRUE}
+#We have unpublished human HTTK data from Ceetox (should be submitted soon):
+#source("Z:/Research Projects/CeetoxHumanHTTK/load-new-data-011918.R")
+httk.cas <- get_cheminfo(model="3compartmentss")
+#Load the Sipes 2017 in silico predictions:
+#chem.physical_and_invitro.data <- httk::load_sipes2017()
+#sipes.cas <- get_cheminfo(model="3compartmentss")
+#sipes.cas <- sipes.cas[!(sipes.cas%in%httk.cas)]
+load("Z:/Research Projects/CeetoxHumanHTTK/new-httk-2018-03-26.RData")
+chem.physical_and_invitro.data <- add_chemtable(new.data2,
+  current.table=chem.physical_and_invitro.data,
+  data.list=list(Compound="Compound",
+    CAS="CAS",
+    DSSTox.GSID="DSSTox_Substance_Id",
+    Clint="Human.Clint",
+    Clint.pValue="Human.Clint.pValue",
+    Funbound.plasma="Human.Funbound.plasma",
+    LogP="logP",MW="MW",
+    pKa_Accept="pKa_Accept",
+    pKa_Donor="pKa_Donor"),
+  reference="Unpublished Ceetox",
+  species="Human",
+  overwrite=T)
+wambaugh.cas <- get_cheminfo(model="3compartmentss")
+wambaugh.cas <- wambaugh.cas[!(wambaugh.cas%in%httk.cas)]
+
+httk_chems <- httk::get_cheminfo(info="CAS",
+                                 model="3compartmentss")
+# Pull in half-live's from Arnot et al. (2014)
+Arnot2014 <- read.xls("../Arnot2014.xlsx",stringsAsFactors=F,skip=1)
+Arnot2014 <- subset(Arnot2014,!is.na(expected))
+Arnot2014$expected <- 10^Arnot2014$expected
+
+```
+
+```{r chem_descs, warning=FALSE, eval=TRUE}
+
+
+# Read in the results of the delta predictor code:
+all.chems <- readRDS(CHEMDATA)
+all.chems<-subset(all.chems,!duplicated(all.chems))
+```
+```{r nhanes_serum, warning=FALSE, eval=TRUE}
+#Read in computed population serum concentrations
+serum <- as.data.table(read.table("L:/Lab/NCCT_ExpoCast/ExpoCast2018/Biomonitoring/NHANES_BloodSerum_analysismapping/output/NHANES_chems_bloodserum_pctiles.txt",header=T,stringsAsFactors=F))
+serum <- serum[Lipid.Adjusted==FALSE & CASRN!=""& Medium=="Serum",]
+lodpct <- as.data.table(read.table("L:/Lab/NCCT_ExpoCast/ExpoCast2018/Biomonitoring/NHANES_BloodSerum_analysismapping/output/NHANES_chems_bloodserum_LODpctiles.txt",header=T,stringsAsFactors=F))
+lodpct <- lodpct[Lipid.Adjusted==FALSE & CASRN!="" & Medium=="Serum",]
+#Set NHANES.Cycle to an ordered factor variable so we can take the most recent numbers
+serum[, NHANES.Cycle:=factor(NHANES.Cycle, 
+                              levels=rev(LETTERS[2:7]))]
+lodpct[, NHANES.Cycle:=factor(NHANES.Cycle, 
+                              levels=rev(LETTERS[2:7]))]
+#Get most recent NHANES cycle for each chemical
+latestcycle <- serum[, levels(serum$NHANES.Cycle)[min(as.numeric(NHANES.Cycle))], by=CASRN]
+setnames(latestcycle, "V1", "NHANES.Cycle")
+#Keep only the most recent cycle's data for each chemical
+serum <- merge(serum, latestcycle, by=c("CASRN", "NHANES.Cycle"))
+lodpct <- merge(lodpct, latestcycle, by=c("CASRN", "NHANES.Cycle"))
+
+#merge together the serum concentrations and LOD information
+serum <- merge(serum[, .(CASRN, NHANES.Cycle, p0.05, p0.5, p0.95, Concentration.Units)],
+               lodpct[, .(CASRN, NHANES.Cycle, p0.05, p0.5, p0.95, Concentration.Units)],
+               by=c("CASRN", "NHANES.Cycle", "Concentration.Units"))
+setnames(serum, 
+         names(serum),
+         gsub(x=names(serum),
+              pattern=".x",
+              replacement=".conc",
+              fixed=TRUE))
+setnames(serum, 
+         names(serum),
+         gsub(x=names(serum),
+              pattern=".y",
+              replacement=".LOD",
+              fixed=TRUE))
+
+
+
+#keep only chemicals for which httk has info to calc total clearance
+serum <- subset(serum, CASRN %in% httk_chems)
+
+#Set censoring variable
+serum[, isAboveLOD:=0]
+serum[p0.05.conc>p0.05.LOD, isAboveLOD:=1]
+serum[p0.5.conc>p0.5.LOD, isAboveLOD:=1]
+serum[p0.95.conc>p0.95.LOD, isAboveLOD:=1]
+serum[is.na(p0.5.LOD), isAboveLOD:=1] #if LOD missing, it means all observations were above LOD (so LOD couldn't be inferred from values imputed to missing data) and there was no fixed LOD provided in NHANES docs.
+  
+#Convert to units of mg/L
+
+#first: ng chem/g serum
+serum[Concentration.Units=="ng/g", c("p0.05.conc",
+                                     "p0.5.conc",
+                                     "p0.95.conc",
+                                     "p0.05.LOD",
+                                     "p0.5.LOD",
+                                     "p0.95.LOD"):=lapply(.SD, 
+                                                          function(x) x* #ng chem/g serum
+                        1.025* #g serum/mL serum
+                        1e-6* #mg chem/ng chem
+                      1e-3 #mL serum/L serum
+                      ),
+      .SDcols=c("p0.05.conc",
+                                     "p0.5.conc",
+                                     "p0.95.conc",
+                                     "p0.05.LOD",
+                                     "p0.5.LOD",
+                                     "p0.95.LOD")]
+
+serum[Concentration.Units=="ng/mL",
+      c("p0.05.conc",
+                                     "p0.5.conc",
+                                     "p0.95.conc",
+                                     "p0.05.LOD",
+                                     "p0.5.LOD",
+                                     "p0.95.LOD"):=lapply(.SD,
+                                                          function(x) x* #ng chem/mL serum
+                                                            1e-6* #mg chem/ng chem
+                                                            1e3), #mL serum/L serum
+      .SDcols=c("p0.05.conc",
+                                     "p0.5.conc",
+                                     "p0.95.conc",
+                                     "p0.05.LOD",
+                                     "p0.5.LOD",
+                                     "p0.95.LOD")] 
+
+serum[Concentration.Units %in% c("ng/g", "ng/mL"), Concentration.Units:="mg/L"]
+serum[, CLtot.LperhperkgBW:=httk::calc_total_clearance(chem.cas=CASRN, suppress.messages=TRUE),
+      by=CASRN]
+serum[CASRN%in%httk.cas,Reference:="Pearce et al. (2017)"]
+serum[CASRN%in%wambaugh.cas,Reference:="Wambaugh et al. (in preparation)"]
+# Since Arnot 2014 had some measured half-lives, use those instead of in vitro/in silico numbers
+for (this.cas in Arnot2014$Substance_CASRN)
+{
+  serum[CASRN==this.cas,CLtot.LperhperkgBW:=httk::calc_vdist(chem.cas=this.cas)*log(2)/Arnot2014[Arnot2014$Substance_CASRN==this.cas,"expected"]]  
+  serum[CASRN==this.cas,Reference:="Arnot et al. (2014)"]
+}  
+
+# Since PFC's aren't modeled well by HTTK, take the PFOS and PFOA clearances from EPA Drinking Water Advisories:
+serum[CASRN=="1763-23-1",CLtot.LperhperkgBW:=0.00014/24]
+serum[CASRN=="335-67-1",CLtot.LperhperkgBW:=0.000081/24] 
+serum[CASRN=="1763-23-1",Reference:="USEPA (2016a)"]
+serum[CASRN=="335-67-1",Reference:="USEPA (2016b)"] 
+
+
+serum[, "lP":=p0.5.conc*CLtot.LperhperkgBW*24]
+serum[, "lP.min":=p0.05.conc*CLtot.LperhperkgBW*24]
+serum[, "lP.max":=p0.95.conc*CLtot.LperhperkgBW*24]
+#For the effective LOD, use the 95th percentile LOD and get the equivalent dose
+serum[, lP.LOD:=p0.95.LOD*CLtot.LperhperkgBW*24]
+serum[is.na(lP.LOD), lP.LOD:=0] #if missing, everything was above LOD so just set LOD =0
+#This back-transforms observed serum concentration into an inferred dose,
+#based on total clearance.
+serum[, media:="serum"]
+setnames(serum, "CASRN", "CAS")
+serum<-merge(serum,all.chems[,1:2],all.x=T,by="CAS")
+```
+
+## Urine biomonitoring
+These inferred exposures are for the parent chemicals of metabolites monitored in urine by NHANES. The inferences were done previously, and are for median exposure rates in mg/kg/day.
+```{r nhanes_urine, eval=TRUE}
+urine.inferrence <- fread("Heuristics-OnlyPforBootstrappedAllSubsets/GMandCL4NHANESchems-Total.csv")
+setnames(urine.inferrence, "CASRN", "CAS")
+urine.inferrence[, media:="urine"]
+#urine.inferrence[,lp.ratio:=round(log10(lP.max/lP.min))]
+urine.inferrence[, isAboveLOD:=1]
+# For the Wambaugh et al. (2014) the chemicals with really large confidence intervales were effectively below the limit of detection:
+#urine.inferrence[lp.ratio>2,isAboveLOD:=0]
+urine.inferrence[, lP.LOD:=0]
+#urine.inferrence[lp.ratio>2,lP.LOD:=lP.max]
+urine.inferrence<-merge(urine.inferrence,all.chems[,1:2],all.x=T,by="CAS")
+urine.inferrence[,Reference:="Ring et al. (2017)"]
+```
+
+## Using NHANES inferred exposures to infer the model parameters
+The NHANES-inferred exposures are used as the observed response data when inferring the model parameters. To bring the problem into a scale that's easier to handle computationally, we first log-transform the inferred exposure data, and then center and scale it (by subtracting the mean over all chemicals, then dividing by the standard deviation over all chemicals). (Note: Parameter inference can be done without the centering and scaling step, and results are quite similar.)
+```{r make_nhanes_obs, eval=TRUE}
+NHANES.obs <- rbind(urine.inferrence[, .(dsstox_substance_id, CAS, lP, lP.min, lP.max, lP.LOD, media, isAboveLOD)],
+                    serum[, .(dsstox_substance_id, CAS, lP, lP.min, lP.max, lP.LOD, media, isAboveLOD)],
+                    use.names=TRUE)
+NHANES.obs <- subset(NHANES.obs,!(as.vector(sapply(NHANES.obs[,"CAS",with=F],as.character))%in%c("5871-17-0","1068-22-0","100-17-4","486-56-6"))) #Remove Endogenous compounds and cotinine
+
+
+NHANES.obs[, c("logmgpkgpday",
+               "log.lP.min",
+               "log.lP.max",
+               "log.lP.LOD"):=lapply(.SD, log),
+           .SDcols=c("lP", "lP.min", "lP.max", "lP.LOD")]
+NHANES.obs[, sigma:=(log.lP.max-log.lP.min)/(qnorm(0.975)-qnorm(0.025))] #assume 95% CI spans four (+-2) standard deviations
+# If everything is below LOD need an estimate on sigma:
+NHANES.obs[sigma==0,sigma:=max(sigma)]
+NHANES.obs
+
+#save mean and sd to scale back later
+NHANES.obs.mean.logmgpkgpday <- NHANES.obs[, mean(logmgpkgpday, na.rm=TRUE)]
+NHANES.obs.sd.logmgpkgpday <- NHANES.obs[, sd(logmgpkgpday, na.rm=TRUE)]
+
+NHANES.obs[, scaledlogmgpkgpday:=(logmgpkgpday-NHANES.obs.mean.logmgpkgpday)/
+             NHANES.obs.sd.logmgpkgpday]
+NHANES.obs[, scaledsigma:=sigma/NHANES.obs.sd.logmgpkgpday]
+setnames(NHANES.obs, "lP", "mgpkgpday")
+```
+
+For each chemical with an NHANES-inferred exposure, we also have observed independent variables: its probability of exposure via each of the four pathways (Dietary, Residential, Pesticide, and Industrial), and its exposure predicted by each of the three models (SHEDS-HT Dietary, SHEDS-HT Residential, and Pesticide Re-Registration Documents).
+
+The probability of exposure via each pathway is easily merged from the `data.dt` table constructed earlier.
+```{r merge_deltas, eval=TRUE}
+#merge in deltas for each pathway
+if (!all(NHANES.obs$CAS%in%all.chems$CAS))
+{
+  cat("Missing predictors for NHANES chemicals:")
+  cat(NHANES.obs$CAS[!(NHANES.obs$CAS%in%all.chems$CAS)])
+  NHANES.obs <-NHANES.obs[NHANES.obs$CAS%in%all.chems$CAS]
+}
+NHANES.obs <- merge(NHANES.obs, 
+                    all.chems[, .SD,
+                              .SDcols=c("CAS",
+                                        paste("delta",
+                                              PATHWAY.NAMES,
+                                              "pred",
+                                              sep="."),
+                                        paste("delta",
+                                              PATHWAY.NAMES,
+                                              "OOB.err",
+                                              sep="."),
+                                  MODEL.NAMES
+                                  )], 
+                    by="CAS",
+                    all.x=TRUE)
+setnames(NHANES.obs,
+         MODEL.NAMES,
+         paste("Pred",
+               MODEL.NAMES,
+               sep="."))
+```
+
+To match the scaling of the NHANES-inferred exposures, the model-predicted exposures are log-transformed, centered, and scaled.
+```{r scale_pred_exposures, eval=TRUE}
+#log-transform predicted exposures
+NHANES.obs[, paste("Pred",
+               MODEL.NAMES,
+               "log",
+               sep="."):=lapply(.SD, log),
+           .SDcols=paste("Pred",
+               MODEL.NAMES, sep=".")]
+
+# Don't want chemicals with replicate observations (e.g., blood and urine) skewing the means/sds:
+NHANES.obs.unique <- NHANES.obs[!duplicated(NHANES.obs$dsstox_substance_id)]
+
+model.means <- NULL
+model.sds <- NULL
+for (this.model in paste("Pred", MODEL.NAMES,"log",sep="."))
+{
+  these.preds <- unlist(NHANES.obs.unique[,this.model,with=F])
+  these.preds <- these.preds[is.finite(these.preds)]
+  model.means[this.model] <- mean(these.preds,na.rm=T)
+  model.sds[this.model] <- sd(these.preds,na.rm=T)
+  NHANES.obs[, paste(this.model,"scale",sep="."):=(NHANES.obs[,this.model,with=F] - model.means[this.model])/model.sds[this.model]]
+}
+
+# Minimum values (used to replace zeros on log scale:)
+model.mins<-NULL
+for (this.model in paste("Pred", MODEL.NAMES,"log.scale",sep="."))
+{
+  model.mins[this.model] <- round(sort(unique(NHANES.obs[[this.model]]))[2])-2
+  set(NHANES.obs,which(is.infinite(NHANES.obs[[this.model]])),this.model,model.mins[this.model])
+}
+#Stockholm convention presence is a factor, no need to scale and transform:
+NHANES.obs[,Pred.Stockholm.log.scale:=Pred.Stockholm]
+
+```
+
+Note that there are chemicals with two different NHANES-inferred exposures --- one from serum biomonitoring and one from urine biomonitoring.
+
+```{r NHANES_obs_duplicate_cas, eval=TRUE}
+dupcas <- NHANES.obs[duplicated(NHANES.obs$CAS), CAS]
+NHANES.obs[CAS%in%dupcas,]
+```
+
+# Add in chemical names:
+```{r select_chems}
+NHANES.obs <- merge(NHANES.obs,all.chems[,c("CAS","Substance_Name")],by.x="CAS",by.y="CAS",all.x=T)
+```
+
+```{r plot_eval_data}
+NHANES.obs <- NHANES.obs[!is.na(Substance_Name)]
+
+# This code puts the chemicals into order by UCI:
+chem.names <- NHANES.obs$Substance_Name
+chem.names[chem.names=="Phosphorothioic acid, O,O-diethyl ester, potassium salt (1:1)"] <- "DETP"
+NHANES.obs$Substance_Name <- chem.names
+UCI <- NHANES.obs$lP.max
+names(UCI) <- chem.names
+UCI <- sort(UCI)
+NHANES.obs$Substance_Name <- factor(NHANES.obs$Substance_Name, levels=unique(names(UCI)))
+
+scientific_10 <- function(x) {                                  
+  out <- gsub("1e", "10^", scientific_format()(x))              
+  out <- gsub("\\+","",out)                                     
+  out <- gsub("10\\^01","10",out)                               
+  out <- parse(text=gsub("10\\^00","1",out))                    
+} 
+
+Eval.Data.Fig <- ggplot(data=NHANES.obs) +
+# Add confidence inerval:
+  geom_segment(aes(y=Substance_Name,yend=Substance_Name,x=lP.min,xend=lP.max,color=media)) +
+# Add points for the median:
+ geom_point(aes(y=Substance_Name,x=mgpkgpday,shape=media,color=media),size=3)+
+# Adjust font sizes:
+  theme(axis.title.x = element_text(size=16))+
+  theme(axis.title.x = element_text(size=16))+
+  theme(axis.text.y = element_text(size=1))+
+# Logarithmic scale for x-axis:
+  scale_x_log10(label=scientific_10)+
+# Label the axes:
+  ylab("Evaluation Chemicals")+
+  xlab("Exposure Rate (mg/kg BW/day)")+
+  theme_bw()
+
+print(Eval.Data.Fig)  
+
+```
+
+```{r append_medium, eval=TRUE}
+
+
+#Build a supplemental table from the data (starting with the substance name, rather than CAS:
+sup.table.obs <- NHANES.obs[,c("Substance_Name","CAS","media","mgpkgpday","lP.min","lP.max", 
+paste("delta",PATHWAY.NAMES,"pred",sep="."),paste("Pred",MODEL.NAMES,sep=".")),with=F]
+# Rename the min and max parent predictions for clarity:
+colnames(sup.table.obs)[5] <- "mgpkgpday.min"
+colnames(sup.table.obs)[6] <- "mgpkgpday.max"
+# Pull in the clearanes used for the serum data:
+sup.table.obs <- merge(sup.table.obs,serum[,c("CAS","CLtot.LperhperkgBW","Reference")],by="CAS",all=T)
+# Pullin the deltas that will actually be used (training set positives/negatives overwrite
+# RF predicitons with a 1/0):
+load(TRAINING.DATA)
+for (this.cas in unique(sup.table.obs$CAS))
+  for (this.path in PATHWAY.NAMES)
+  {
+sup.table.obs[sup.table.obs$CAS==this.cas,paste("delta",this.path,"used",sep=".")]<- sup.table.obs[sup.table.obs$CAS==this.cas,paste("delta",this.path,"pred",sep="."),with=F]
+if(this.cas %in% positives[[this.path]]) sup.table.obs[sup.table.obs$CAS==this.cas,paste("delta",this.path,"used",sep=".")]<-1
+    else if(this.cas %in% negatives[[this.path]]) sup.table.obs[sup.table.obs$CAS==this.cas,paste("delta",this.path,"used",sep=".")]<-0
+  }
+#Reorder the columns:
+sup.table.obs <- sup.table.obs[,c("Substance_Name","CAS","media","mgpkgpday","mgpkgpday.min","mgpkgpday.max","CLtot.LperhperkgBW","Reference",paste("delta",PATHWAY.NAMES,"pred",sep="."),paste("delta",PATHWAY.NAMES,"used",sep="."),paste("Pred",MODEL.NAMES,sep=".")),with=F]
+write.csv(sup.table.obs,file=paste("NHANES.obs.table-",Sys.Date(),".txt",sep=""),row.names=F)
+knitr::kable(sup.table.obs)
+
+#Label the chemicals with serum and urine data both:
+NHANES.obs[CAS%in%dupcas, CAS:=paste(CAS, media, sep="."), by=media]
+
+```
+
+```{r save_data, echo=FALSE}
+saveRDS(NHANES.obs,file=paste("NHANES-data-",Sys.Date(),".RData",sep=""))
+saveRDS(NHANES.obs.mean.logmgpkgpday,file=paste("NHANES-mean-",Sys.Date(),".RData",sep=""))
+saveRDS(NHANES.obs.sd.logmgpkgpday, file=paste("NHANES-sd-",Sys.Date(),".RData",sep=""))
+saveRDS(model.means, file=paste("model.means-",Sys.Date(),".RData",sep=""))
+saveRDS(model.sds, file=paste("model.sds-",Sys.Date(),".RData",sep=""))
+saveRDS(model.mins, file=paste("model.mins-",Sys.Date(),".RData",sep=""))
+```

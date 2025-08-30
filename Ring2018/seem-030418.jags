@@ -1,0 +1,61 @@
+# obs contains the inferred mean log exposure rates for Nchem chemicals
+#  from Wambaugh et al. (2014)
+# obs.sd contains the inferred standard deviation on log scale
+# obs.lod contains the limit of detection on exposure rate inferrence
+#
+# a[Npath] is the average (log) exposure rate for a pathway
+# a0 is the average exposure unexplained by the pathways analyzed
+#
+# wmatrix[Nweights] is the weight for a given combination of model and pathway
+# wmodel[Nweights] identifies which model a given weight corresponds to
+# wpathway[Newights] identifies a pathway a given weight correpsonds to
+# w[Nmodel,Npath] is a matrix of mostly zeros, nonzero entries correspond to
+#   models that participate in a given pathway
+#
+# deltaprior[Nchem,Npath] is a matrix of probabilities that a chemical is subject
+#   to a given pathway (precomputed via method of Random Forests)
+# delta[Nchem,Npath] is a Boolean matrix indicating whether or not a given
+#  chemical has exposure via a given pathway
+#
+# sigma[Npath] is a pathway-specific estimate of standard deviation
+#
+var R2, consensus[Nchem], a[Npath], wvector[Nnonzerow], means[Nchem,Npath], weightedpreds[Nchem, Nnonzerow], summean[Nchem], sumweightedpreds[Nchem], delta[Nchem, Npath]
+
+model {
+for (chem in 1:Nchem){
+  isAboveLOD[chem] ~ dinterval(exp(logobs[chem]), LOD[chem])
+  consensus[chem] <- a0 + summeans[chem]+sumweightedpreds[chem]
+  logobs[chem] ~ dnorm(consensus[chem], 1/(pow(sigma0,2)+pow(sigma[chem],2)))
+  sigma[chem] ~ dunif(0,100) #For missing/censored data only
+  for (path in 1:Npath){
+#   delta[chem, path] ~ dbern(deltap[chem, path])
+#   deltap[chem, path] ~ dbeta(alpha[chem, path], beta[chem, path])
+    means[chem,path] <- delta[chem, path]*a[path]
+  }
+  for (i in 1:Nnonzerow)                   
+  {
+    weightedpreds[chem,i] <- delta[chem, wpath[i]]*wvector[i]*pred[chem,wmdl[i]] #model predicted exposures
+  }
+  summeans[chem] <- sum(means[chem,])
+  sumweightedpreds[chem] <- sum(weightedpreds[chem,]) 
+} #end loop over chemicals
+
+  a ~ dmnorm(mu_a, omega_a)
+  
+# sample the model weights:
+wvector ~ dmnorm(mu_w, omega_w)
+
+#Calculate Bayesian R2 (Gelman, 2017) as we go along
+meanconsensus <- mean(consensus)
+meanresidual <- mean(logobs-consensus)
+R2 <- sum(pow(consensus-meanconsensus,2)) / (sum(pow(consensus-meanconsensus,2)) + sum(pow(logobs-consensus-meanresidual,2)))
+  
+#Priors
+sigma0 ~ dunif(0,100)
+a0 ~ dnorm(0, 1/pow(a0_sd,2))
+#Hyperpriors
+mu_a ~ dmnorm(mu_a_mu, mu_a_omega)
+omega_a ~ dwish(omega_a_R, omega_a_k)
+mu_w ~ dmnorm(mu_w_mu, mu_w_omega)
+omega_w ~ dwish(omega_w_R, omega_w_k)
+}

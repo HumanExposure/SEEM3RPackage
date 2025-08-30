@@ -1,0 +1,729 @@
+title: "Step 1: Load the chemical descriptors for SEEM3"
+author: "Caroline Ring and John Wambaugh"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+The basic SEEM3 equation is a linear combination of model-predicted exposures from different pathways. That is:
+
+Exposure to chemical $i$ = 
+$$= a_0 + \sum_{j=1}^{Npath} \delta_i^j \times \left( a_j + \sum_{k=1}^{Nmodel} m_j^k \times w_k \times p_i^k \right)$$
+
+where 
+
+* $a_0$ represents a "grand mean" exposure over all chemicals; 
+* $N_{path}$ represents the number of pathways under consideration; 
+* $\delta_i^j$ represents the probability that exposure to chemical $i$ occurs via pathway $j$; 
+* $a_j$ represents the additional mean exposure via pathway $j$ over all chemicals (over and above the grand mean); 
+* $N_{model}$ represents the number of models under consideration; 
+* $m_j^k$ represents whether model $k$ models exposure via pathway $j$ or not (it is either 1 or 0); 
+* $w_k$ represents the weight of model $k$; and 
+* $p_i^k$ represents the exposure to chemical $i$ predicted by model $k$.
+
+SEEM currently considers X exposure models and four exposure pathways. 
+
+The models are:
+
+1. SHEDS-HT Nearfield Direct Pathway
+2. SHEDS-HT Nearfield Indirect Pathway
+3. FINE Nearfield Model
+4. Food Contact Chemical Migration Model
+5. Pesticide Reregistration Eligibility Documents
+6. RAIDAR (Far-Field)
+7. RAIDAR ICE (Near-Field)
+8. USETox Pesticide Scenario
+9. USETox Industrial Scenario
+10. USETox Residential Scenario
+11. USETox Dietary Scenario
+12. Production volume
+13. Stockholm Convention on POPs
+
+The pathways are:
+
+1. Dietary
+2. Near-field
+3. Far-field pesticide
+4. Far-field industrial 
+
+
+The goal of this project is to use Bayesian methods to infer the pathway means ($a_j$) and model weights ($w_k$), given the pathway probabilities ($\delta_i^j$), the model predictions ($p_i^k$), and a matrix of 1's and 0's linking pathways to models ($m_j^k$), along with some "observed" total exposures (exposure rates inferred from NHANES biomonitoring data).
+
+For use later, let's define the number of pathways, the number of models, and the names of the pathways and models.
+
+```{r def_model_path}
+rm(list=ls())
+SEEMPATH <- "L:/Lab/NCCT_ExpoCast/ExpoCast2018/SEEM3/"
+setwd(paste(SEEMPATH,"SEEM3_bayes/",sep=""))
+MODEL.NAMES <- c("SHEDS.Direct", 
+                 "SHEDS.Indirect",
+                 "FINE",
+                 "Food.Contact",
+                 "REDS",
+                 "RAIDAR",
+                 "RAIDAR.ICE",
+                 "USETox.Pest",
+                 "USETox.Indust",
+                 "USETox.Res",
+                 "USETox.Diet",
+                 "Production.Volume",
+                 "Stockholm")
+NUM.MODELS <- length(MODEL.NAMES)
+
+PATHWAY.NAMES <- c("Diet",
+                   "Res",
+                   "Pest",
+                   "Indust")
+NUM.PATHWAYS <- length(PATHWAY.NAMES)
+
+NHANES.ANNOTATION <- "SEEM3_bayes/NHANES-CPcat-Manual-022218.xlsx"
+```
+
+Load some R packages for use later.
+```{r load_packages, message=FALSE, warning=FALSE}
+library(data.table)
+library(gdata)
+library(dplyr)
+library(reshape)
+library(knitr)
+library(rmarkdown)
+library(gtools)
+```
+
+Set a seed for reproducibility.
+```{r setseed}
+TeachingDemos::char2seed("Caroline Ring")
+```
+
+# Set the chemical list for analysis:
+```{r select_chems}
+NHANES.chems <- read.xls("NHANES_DSSToxQuery_20170522.xlsx",stringsAsFactors=F)
+
+
+chems <- read.delim("L:/Lab/NCCT_ToxCast/DSSTox Chemicals/DSSTox_Predicted_NCCTProp_Models/DSSToxQueryWPred1.txt",quote="",stringsAsFactors=F,sep="\t")
+chems <- rbind(chems,read.delim("L:/Lab/NCCT_ToxCast/DSSTox Chemicals/DSSTox_Predicted_NCCTProp_Models/DSSToxQueryWPred2.txt",quote="",stringsAsFactors=F,sep="\t"))
+chems <- rbind(chems,read.delim("L:/Lab/NCCT_ToxCast/DSSTox Chemicals/DSSTox_Predicted_NCCTProp_Models/DSSToxQueryWPred3.txt",quote="",stringsAsFactors=F,sep="\t"))
+chems <- rbind(chems,read.delim("L:/Lab/NCCT_ToxCast/DSSTox Chemicals/DSSTox_Predicted_NCCTProp_Models/DSSToxQueryWPred4.txt",quote="",stringsAsFactors=F,sep="\t"))
+
+NHANES.chems <- subset(NHANES.chems, !(DSSTox_Structure_Id%in%chems$DSSTox_Structure_Id))
+chems <- rbind(chems,NHANES.chems[,colnames(chems)])
+chems <- subset(chems,!duplicated(DSSTox_Substance_Id))
+
+write.csv(chems,paste("DSSTox-all-",Sys.Date(),".txt",sep=""),row.names=F)
+```
+#Load CPdat:
+```{r load_cpdat, eval=TRUE}
+source(paste(SEEMPATH,"kki-18-CPDat/CPDat_merge.R",sep=""))
+setwd(paste(SEEMPATH,"SEEM3_bayes",sep=""))
+use_descript <- sort(unique(CPCat$CPCat_term))
+write.csv(CPCat,file=paste("CPDat-",Sys.Date(),".txt",sep=""),row.names=F)
+```
+
+
+
+# Load model predictions
+
+## Load pesticide re-registration predictions
+
+These were previously processed and saved.
+```{r load_reds, eval=TRUE}
+#Supplementary Table 7. Chronic Human Oral Exposure Estimates from Federal Documents
+REDS <- readRDS("REDS_dt.Rdata")[]
+write.csv(REDS$CAS,row.names=F,file="REDS-CAS.txt")
+REDS.DSStox <- read.xls("REDS-DSSTox.xlsx",stringsAsFactors=F)
+REDS <- merge(REDS,REDS.DSStox[,c("Query","DSSTox_Substance_Id","Substance_CASRN","Substance_Name")],by.x="CAS",by.y="Query")
+REDS$CAS <- REDS$Substance_CASRN
+REDS$Compound <- REDS$Substance_Name
+```
+
+##  Load SHEDS-HT predictions
+```{r load_sheds, eval=TRUE}
+SHEDS.direct <- read.csv(paste(SEEMPATH,"SHEDS_25K_01192018/seem3_direct_01192018.csv",sep=""),stringsAsFactors=F)
+SHEDS.indirect <- read.csv(paste(SEEMPATH,"SHEDS_25K_01192018/seem3_indirect_01192018.csv",sep=""),stringsAsFactors=F)
+
+SHEDS.direct <- subset(SHEDS.direct,Cohort=="Total")[,c("new","abs.tot.mgkg_50.")]
+colnames(SHEDS.direct)[1]<-"CAS"
+SHEDS.indirect <- subset(SHEDS.indirect,Cohort=="Total")[,c("CAS","abs.tot.mgkg_50.")]
+
+SHEDS.direct$CAS <- gsub("_","-",SHEDS.direct$CAS)
+SHEDS.indirect$CAS <- gsub("_","-",SHEDS.indirect$CAS)
+
+SHEDS.direct <- merge(SHEDS.direct,chems[,c("Substance_CASRN","Substance_Name","DSSTox_Substance_Id")],by.x="CAS",by.y="Substance_CASRN",all.x=T)
+SHEDS.indirect <- merge(SHEDS.indirect,chems[,c("Substance_CASRN","Substance_Name","DSSTox_Substance_Id")],by.x="CAS",by.y="Substance_CASRN",all.x=T)
+```
+##  Load Biryol et al. (2017) food contact predictions
+```{r load_FINE, eval=TRUE}
+Biryol <- read.csv(paste(SEEMPATH,"FOOD CONTACT/published_foodcontact_predictions.csv",sep=""),stringsAsFactors=F)
+Biryol$CAS <- gsub("_","-",unlist(lapply(strsplit(Biryol$CAS,"CAS_"),function(x) x[2])))
+Biryol <- merge(Biryol,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],all.x=T,by.x="CAS",by.y="Substance_CASRN")
+
+```
+
+##  Load FINE predictions
+```{r load_FINE, eval=TRUE}
+FINE <- read.xls(paste(SEEMPATH,"Partners/SEEM3-Challenge-Chems-Res-062917_HMS.xlsx",sep=""),stringsAsFactors=F,skip=1)
+```
+
+##  Load RAIDAR predictions
+```{r load_FINE, eval=TRUE}
+RAIDAR <- read.xls(paste(SEEMPATH,"Partners/SEEMS3_RAIDARv2.95_RAIDAR-ICEv0.804_Output_May62018.xlsx",sep=""),stringsAsFactors=F,skip=1)
+RAIDAR$mg.kg.d <- as.numeric(RAIDAR$mg.kg.d)
+RAIDAR$mg.kg.d.1 <- as.numeric(RAIDAR$mg.kg.d.1)
+RAIDAR$mg.kg.d.2 <- as.numeric(RAIDAR$mg.kg.d.2)
+
+```
+
+## Load Stockholm convention POPS:
+```{r loadstockholm, eval=TRUE}
+Stockholm <- read.xls(paste(SEEMPATH,"SEEM3_bayes/StockholmConvention.xlsx",sep=""),stringsAsFactors=F)
+```
+
+
+## Load USETox predictions
+
+```{r load_usetox, eval=TRUE}
+
+## USETOX PESTICIDE:
+# Exported the individual sheets from the Excel file to make loading faster:
+usetox.pest1 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-pest-herb-wheat.csv",sep=""),stringsAsFactors=F,skip=4)
+usetox.pest2 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-pest-nonherb-wheat.csv",sep=""),stringsAsFactors=F,skip=4)
+usetox.pest3 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-pest-herb-tomato.csv",sep=""),stringsAsFactors=F,skip=4)
+usetox.pest4 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-pest-nonherb-tomato.csv",sep=""),stringsAsFactors=F,skip=4)
+
+#Get rid of blank entries:
+usetox.pest1 <- usetox.pest1[usetox.pest1$X.1!="",]
+usetox.pest2 <- usetox.pest2[usetox.pest2$X.1!="",]
+usetox.pest3 <- usetox.pest3[usetox.pest3$X.1!="",]
+usetox.pest4 <- usetox.pest4[usetox.pest4$X.1!="",]
+
+#Sum up the different intake factors (columns BF through BO):
+usetox.pest <- apply(usetox.pest1[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1")],1,function(x) sum(as.numeric(x)))
+usetox.pest <- usetox.pest + apply(usetox.pest2[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1")],1,function(x) sum(as.numeric(x)))
+usetox.pest <- usetox.pest + apply(usetox.pest3[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1")],1,function(x) sum(as.numeric(x)))
+usetox.pest <- usetox.pest + apply(usetox.pest4[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1")],1,function(x) sum(as.numeric(x)))
+usetox.pest <- cbind(usetox.pest, usetox.pest1[,c("X.2","X.1")])
+
+# Label columns and add DSSTox_Subtance_Id:
+colnames(usetox.pest) <- c("IF","Compound","CAS")
+usetox.pest <- merge(usetox.pest,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],all.x=T,by.x="CAS",by.y="Substance_CASRN")
+
+## USETOX DIETARY:
+# Exported the individual sheets from the Excel file to make loading faster:
+usetox.diet1 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-food-contact-material.csv",sep=""),stringsAsFactors=F,skip=4)
+
+#Get rid of blank entries:
+usetox.diet1 <- usetox.diet1[usetox.diet1$X.1!="",]
+
+#Sum up the different intake factors (columns BF through BO):
+usetox.diet <- apply(usetox.diet1[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1","inhal.userA.1","dust.userA.1","dir.ing.userA.1","hnd.mth.userA.1","gs.derm.userA.1","dir.derm.userA.1")],1,function(x) sum(as.numeric(x)))
+
+# Label columns and add DSSTox_Subtance_Id:
+usetox.diet <- cbind(usetox.diet, usetox.diet1[,c("X.2","X.1")])
+colnames(usetox.diet) <- c("IF","Compound","CAS")
+usetox.diet <- merge(usetox.diet,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],all.x=T,by.x="CAS",by.y="Substance_CASRN")
+
+## USETOX RESIDENTIAL:
+# Exported the individual sheets from the Excel file to make loading faster:
+usetox.res1 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-flooring.csv",sep=""),stringsAsFactors=F,skip=4)
+
+#Get rid of blank entries:
+usetox.res1 <- usetox.res1[usetox.res1$X.1!="",]
+
+#Sum up the different intake factors (columns BF through BO):
+usetox.res <- apply(usetox.res1[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1","inhal.userA.1","dust.userA.1","dir.ing.userA.1","hnd.mth.userA.1","gs.derm.userA.1","dir.derm.userA.1")],1,function(x) sum(as.numeric(x)))
+
+# Label columns and add DSSTox_Subtance_Id:
+usetox.res <- cbind(usetox.res, usetox.res1[,c("X.2","X.1")])
+colnames(usetox.res) <- c("IF","Compound","CAS")
+usetox.res <- merge(usetox.res,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],all.x=T,by.x="CAS",by.y="Substance_CASRN")
+
+## USETOX INDUST:
+# Exported the individual sheets from the Excel file to make loading faster:
+usetox.indust1 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-urban-and-continental-air.csv",sep=""),stringsAsFactors=F,skip=4)
+usetox.indust2 <- read.csv(paste(SEEMPATH,"Partners/USEtox_nearfield_all_results-freshwater.csv",sep=""),stringsAsFactors=F,skip=4)
+
+#Get rid of blank entries:
+usetox.indust1 <- usetox.indust1[usetox.indust1$X.1!="",]
+usetox.indust2 <- usetox.indust2[usetox.indust2$X.1!="",]
+
+#Sum up the different intake factors (columns BF through BO):
+usetox.indust <- apply(usetox.indust1[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1")],1,function(x) sum(as.numeric(x)))
+usetox.indust <- usetox.indust + apply(usetox.indust2[,c("inhal.pop.1","dr.water.pop.1","abv.prod.pop.1","blw.prod.pop.1","meat.pop.1","dairy.pop.1","fish.pop.1","crop.res.pop.1","gs.derm.pop.1","dir.derm.pop.1")],1,function(x) sum(as.numeric(x)))
+usetox.indust <- cbind(usetox.indust, usetox.indust1[,c("X.2","X.1")])
+
+# Label columns and add DSSTox_Subtance_Id:
+colnames(usetox.indust) <- c("IF","Compound","CAS")
+usetox.indust <- merge(usetox.indust,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],all.x=T,by.x="CAS",by.y="Substance_CASRN")
+
+write.csv(usetox.pest,file=paste("usetox-pest-",Sys.Date(),".txt",sep=""))
+write.csv(usetox.diet,file=paste("usetox-diet-",Sys.Date(),".txt",sep=""))
+write.csv(usetox.res,file=paste("usetox-res-",Sys.Date(),".txt",sep=""))
+write.csv(usetox.indust,file=paste("usetox-indust-",Sys.Date(),".txt",sep=""))
+
+
+
+```
+## Load production volume
+```{r load_production_vol, eval=TRUE}
+CDR.HPV <- read.xls("../CDR-HPV-2016.xlsx",stringsAsFactors=FALSE)
+CDR.HPV <- subset(CDR.HPV,DSSTox_Substance_Id!="")
+CDR.HPV$CAS <- CDR.HPV$Substance_CASRN
+CDR.HPV$Compound <- CDR.HPV$Substance_Name
+
+
+#Convert CDR categories (lbs/year) into kg/day
+CDR.to.geometric.mean <- function(x)
+{
+  if (x == "Withheld")
+ # Assume somewhere between 500,000 lbs and 1 billion lbs):
+    return(exp((log(25000)+log(5*10^11))/2)/2.204/365.25)
+  else if (x == "< 25,000 lb")
+    return(25000/2/2.204/365.25)
+  else if (x == ">200,000,000,000 lb")
+    return(5*10^11/2.204/365.25)
+  else if (regexpr(" - ",x)!=-1)
+  {
+    temp <- strsplit(x," ")[[1]]
+    lower.bound <- as.numeric(gsub(",","",temp[1]))
+    upper.bound <- as.numeric(gsub(",","",temp[3]))
+    return(exp((log(lower.bound)+log(upper.bound))/2)/2.204/365.25)
+  } else print(CDR.HPV[this.row,"CHEM_AGG_P"])
+}
+
+
+CDR.HPV <- cbind(CDR.HPV,unlist(lapply(as.list(CDR.HPV$X2015.Aggregate.PV..Lbs..),CDR.to.geometric.mean)))
+colnames(CDR.HPV)[length(colnames(CDR.HPV))] <- "kgs.day"
+```
+
+## Load FDA CEDI
+```{r load_FDA, eval=TRUE}
+
+FDA <- read.csv("../FDA CEDI/CDI.csv",stringsAsFactors=F)
+
+FDA$CASRN <- sub("^0*","",FDA$CASRN)
+FDA$CASRN <- gsub("_","-",FDA$CASRN)
+colnames(FDA)[2] <- "CAS"
+colnames(FDA)[4] <- "CEDI"
+FDA<-as.data.table(FDA)
+FDA <- FDA[!is.na(CAS)]
+
+write.csv(FDA$FCS_chemical_name,row.names=F,file="FDA-names.txt")
+write.csv(FDA$CAS,row.names=F,file="FDA-CAS.txt")
+FDA.DSStox <- read.xls("FDA-names-DSSTox.xlsx",stringsAsFactors=F)
+FDA.DSStox <- rbind(FDA.DSStox,read.xls("FDA-cas-DSSTox.xlsx",stringsAsFactors=F))
+FDA.DSStox <- subset(FDA.DSStox,Found_By!="Not Found")
+FDA.DSStox <- subset(FDA.DSStox,!duplicated(DSSTox_Substance_Id))
+
+FDA1 <- merge(FDA,FDA.DSStox[,c("Query","DSSTox_Substance_Id","Substance_CASRN","Substance_Name")],by.x="CAS",by.y="Query")
+FDA2 <- merge(FDA,FDA.DSStox[,c("Query","DSSTox_Substance_Id","Substance_CASRN","Substance_Name")],by.x="FCS_chemical_name",by.y="Query")
+FDA <- rbind(FDA1,FDA2)
+FDA <- subset(FDA,!duplicated(DSSTox_Substance_Id))
+
+FDA$CAS <- FDA$Substance_CASRN
+FDA$Compound <- FDA$Substance_Name
+```
+
+# Load chemical descriptors
+Read in some background data on chemicals: use categories and physical-chemical properties.
+
+## Load physical-chemical properties
+Next, read in physical-chemical properties. The `load` statement reads in a data frame called `chemprop.table`.
+
+```{r load_physchem, eval=TRUE}
+chemprop.table <- read.csv(paste(SEEMPATH,"DSSTox_OPERA_predictions_10272016.csv",sep=""),stringsAsFactors = F)
+
+chemprop.table <- as.data.table(chemprop.table)
+chemnames <- chemprop.table[,.(dsstox_substance_id,preferred_name)]
+chemnames <- chemnames[!duplicated(dsstox_substance_id),]
+chemprop.table <- dcast(chemprop.table, dsstox_substance_id ~ name, fun=mean, value.var=c("result_value"))
+chemprop.table <-merge(chemprop.table,chemnames,by="dsstox_substance_id",all.x=T)
+# Four NHANES chemicals were missing from the OPERA predictions:
+extra.NHANES <- read.xls(paste(SEEMPATH,"SEEM3_bayes/NHANESProps.xlsx",sep=""),stringsAsFactors=F)
+colnames(extra.NHANES)[1] <- colnames(chemprop.table)[1]
+colnames(extra.NHANES)[colnames(extra.NHANES)=="Substance_Name"] <- "preferred_name"
+
+extra.NHANES <- extra.NHANES[,colnames(chemprop.table)]
+# Don't creat duplicates (breaks data.table):
+extra.NHANES <- subset(extra.NHANES,!(dsstox_substance_id%in%chemprop.table$dsstox_substance_id))
+
+
+chemprop.table <- rbind(chemprop.table,extra.NHANES)
+
+physchem.props <- colnames(chemprop.table)[2:(length(colnames(chemprop.table))-1)]
+
+```
+## Load ToxPrint structure descriptors:
+```{r load_toxprint, eval=TRUE}
+load("L:/Lab/NCCT_ExpoCast/ExpoCast2018/ToxPrints/dsstox_toxprint_by_casrn.RData")
+structure.desc <- colnames(dtx_toxprint)[2:730]
+extra.NHANES.TP <- read.csv("toxprint_V2_vs_jfw_smiles.csv",stringsAsFactors = F)
+extra.NHANES.TP <- rbind(extra.NHANES.TP,extra.NHANES.TP[4,])
+colnames(extra.NHANES.TP)[1] <- "casrn"
+extra.NHANES.TP$casrn <- c("28553-12-0",
+                           "74223-64-6",
+                           "26761-40-0",
+                           "8018-01-7",
+                           "9006-42-2"
+                           )
+extra.NHANES.TP <- subset(extra.NHANES.TP,!(casrn%in%dtx_toxprint$casrn))
+dtx_toxprint <- rbind(dtx_toxprint,extra.NHANES.TP)
+```
+
+# Certainty of chemical exposure via each of the pathways
+The certainty that exposure to a given chemical occurs via each of the four pathways is predicted by one of three methods. First, if the SHEDS-predicted dietary or residential exposure to a chemical is above a threshold value, then exposure is judged to occur via that pathway. Second, if a chemical is not included in the SHEDS HT data set at all, then the certainty that exposure occurs via dietary or residential pathways can be predicted using use categories and physical-chemical properties as descriptors and the SHEDS data as a training set. Third, use descriptors can be used to determine whether a chemical is a pesticide or an industrial chemical. If a chemical is a pesticide, then the pesticide exposure pathway is relevant; if a chemical is an industrial chemical, then the industrial exposure pathway is relevant.
+
+```{r do_allchems, eval=TRUE}
+all.chems <- merge(chemprop.table,
+                   chems,
+                   by.x="dsstox_substance_id",
+                   by.y="DSSTox_Substance_Id"
+                   )
+
+# Add molecular weight as descriptor:
+physchem.props <- unique(c(physchem.props,"Structure_MolWt","NCCT_Csatw","NCCT_LogKAW"))
+colnames(all.chems)[colnames(all.chems)=="Substance_CASRN"]<-"CAS"
+
+#keep chems with uses but without physchem, and vice versa
+#remove chemical with missing CAS number
+#all.chems <- all.chems[CAS!="", c("CAS",physchem.props),with=F]
+
+all.chems <- merge(all.chems,dtx_toxprint,by.x="CAS",by.y="casrn")
+all.chems$CAS <- as.character(all.chems$CAS)
+```
+#Load datasets with known chemical pathways:
+```{r do_pathwaypositives, eval=TRUE}
+sources <- as.data.frame(matrix("",nrow=NUM.PATHWAYS,ncol=2),stringsAsFactors=F)
+colnames(sources) <- c("Positive","Negative")
+rownames(sources) <- PATHWAY.NAMES
+
+positives<-list()
+negatives<-list()
+
+pharmaceuticals <- read.xls(paste(SEEMPATH,"DSSTox_PHRMPEND_20170531.xlsx",sep=""),stringsAsFactors=F)
+pharmaceuticals <- subset(pharmaceuticals,DSSTox_Substance_Id!="")
+pharmaceuticals <- pharmaceuticals[,c("Substance_Name","Substance_CASRN","DSSTox_Substance_Id")]
+
+ExpoCast.products <- read.csv(paste(SEEMPATH,"data_files/ALL_DATA_product_deformulation_05012017.csv",sep=""),stringsAsFactors=F)
+confirmed.chemicals <- c("xc",
+  "xc;hc",
+  "xc;hc10-15",
+  "xc;hc12-25",
+  "xc;hc16-32",
+  "xc;hc;m",
+  "xc;hc16-32;m",
+  "xc;hc12-25;m",
+  "xc;hc10-15;m",
+  "xc;hc;m;D10ur",
+  "xc;hc;D10ur"
+  )
+tentative.chemicals <- c("xt",
+  "xt;d10",
+  "xt;seed10",
+  "xt;d100",
+  "xt;oa",
+  "xt;oa;m",
+  "xtns"
+  )
+ExpoCast.conftent <- subset(ExpoCast.products,Group%in%c(confirmed.chemicals,tentative.chemicals))
+ExpoCast.conftent <- merge(ExpoCast.conftent,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],by.x="CAS",by.y="Substance_CASRN")
+
+
+
+CPCat$dsstox_substance_id<-as.character(CPCat$dsstox_substance_id)
+positives[["Diet"]] <- unique(c(FDA$DSSTox_Substance_Id,
+                                subset(ExpoCast.conftent,ProductType=="Cereals")$DSSTox_Substance_Id,
+                                Biryol$DSSTox_Substance_Id,
+                           subset(CPCat,CPCat_term%in%c("food","food_additive","food_contact"))$dsstox_substance_id))
+sources["Diet","Positive"] <- "FDA CEDI, ExpoCast, CPDat (Food, Food Additive, Food Contact), NHANES Curation"
+CPCat.nonfood <- subset(CPCat,!(dsstox_substance_id%in%subset(CPCat,regexpr("food",tolower(CPCat_term))!=-1)$dsstox_substance_id))
+negatives[["Diet"]] <- unique(c(pharmaceuticals$DSSTox_Substance_Id,
+                         CPCat.nonfood$dsstox_substance_id))
+sources["Diet","Negative"] <- "Pharmapendium, CPDat (non-food), NHANES Curation"
+
+
+positives[["Res"]] <- unique(c(subset(CPCat,CPCat_term%in%c("consumer_use","building_material","wood","insulation4"))$dsstox_substance_id,
+                               subset(ExpoCast.conftent,ProductType!="Cereals")$DSSTox_Substance_Id
+                                 ))
+sources["Res","Positive"] <- "CPDat (consumer_use, building_material), ExpoCast, NHANES Curation"
+negatives[["Res"]] <- unique(c(FDA$DSSTox_Substance_Id,subset(CPCat,CPCat_term%in%c("agricultural","industrial"))$dsstox_substance_id))
+sources["Res","Negative"] <- "CPDat (Agricultural, Industrial), FDA CEDI, NHANES Curation"
+
+SwissPest <- read.delim("SWISSPEST.tsv",stringsAsFactors=F)
+
+positives[["Pest"]] <- unique(c(SwissPest$DTXSID,REDS$DSSTox_Substance_Id,
+                                subset(Stockholm,Class=="Pesticide")$DSSTox_Substance_Id,
+                                subset(CPCat,CPCat_term%in%c("pesticide"))$dsstox_substance_id))
+
+num.far.field.pest.positives <- length(positives[["Pest"]])
+sources["Pest","Positive"] <- "REDs, Swiss Pesticides, Stockholm Convention, CPDat (Pesticide), NHANES Curation" 
+
+
+USGS <- read.xls("HUC4samples.xls",stringsAsFactors=F)
+USGS <- merge(USGS,chems[,c("Substance_CASRN","DSSTox_Substance_Id")],by.x="CASRN",by.y="Substance_CASRN")
+
+PFAS <- read.delim("PFASTRIER.tsv",stringsAsFactors=F)
+PFAS2 <- read.delim("SFISHFLUORO.tsv",stringsAsFactors=F)
+
+positives[["Indust"]] <- unique(c(PFAS$DTXSID,PFAS2$DTXSID,CDR.HPV$DSSTox_Substance_Id,
+                                       USGS$DSSTox_Substance_Id,
+                                       subset(Stockholm,Class=="Industrial")$DSSTox_Substance_Id,
+                                       subset(CPCat,CPCat_term%in%c("industrial","industrial_fluid"))$dsstox_substance_id
+                                  ))
+#Choose to consider no pesticides as industrial compounds:
+positives[["Indust"]] <- positives[["Indust"]][!(positives[["Indust"]]%in%positives[["Pest"]])]
+sources["Indust","Positive"] <- "CDR HPV, USGS Water Occurrence, NORNAN PFAS, Stockholm Convention, CPDat (Indutrial, Industrial_Fluid), NHANES Curation" 
+
+num.indust.positives <- length(positives[["Indust"]])
+
+negatives[["Pest"]] <- unique(c(pharmaceuticals$DSSTox_Substance_Id,positives[["Indust"]]))
+sources["Pest","Negative"] <- "Pharmapendium, Industrial Positives, NHANES Curation" 
+
+
+
+negatives[["Indust"]] <- unique(c(pharmaceuticals$DSSTox_Substance_Id,
+                           positives[["Pest"]]))
+                          
+sources["Indust","Negative"] <- "Pharmapendium, Pesticide Positives, NHANES Curation" 
+```
+# Clean up the positives and negatives for the pathway model:
+```{r clean_reference_structurs, eval=TRUE}
+CPcat.manual <- read.xls(paste(SEEMPATH,NHANES.ANNOTATION,sep=""),stringsAsFactors=F)
+CPcat.manual[is.na(CPcat.manual)] <- ""
+
+for (this.path in PATHWAY.NAMES)
+{
+# Add NHANES curated chemicals:
+  positives[[this.path]] <- unique(c(positives[[this.path]],subset(CPcat.manual,CPcat.manual[,this.path]==1)$DSSTox_Substance_Id))
+  positives[[this.path]] <- positives[[this.path]][!(positives[[this.path]]%in%subset(CPcat.manual,CPcat.manual[,this.path]==0)$DSSTox_Substance_Id)]
+  negatives[[this.path]] <- unique(c(negatives[[this.path]],subset(CPcat.manual,CPcat.manual[,this.path]==0)$DSSTox_Substance_Id))
+  negatives[[this.path]] <- negatives[[this.path]][!(negatives[[this.path]]%in%subset(CPcat.manual,CPcat.manual[,this.path]==1)$DSSTox_Substance_Id)]
+  
+# Keep only the chems we have descriptors for:
+  positives[[this.path]] <- positives[[this.path]][positives[[this.path]]%in%all.chems$dsstox_substance_id]
+  negatives[[this.path]] <- negatives[[this.path]][negatives[[this.path]]%in%all.chems$dsstox_substance_id]
+# Make sure there is no structure in how the CAS are ordered:
+  positives[[this.path]] <- permute(positives[[this.path]])
+  negatives[[this.path]] <- permute(negatives[[this.path]])
+# Make sure there are no negatives from the positives list:
+  negatives[[this.path]] <- negatives[[this.path]][!(negatives[[this.path]]%in%positives[[this.path]])]
+}
+
+```
+
+
+#Load model predictions:
+For each table of predictions I subset down to a two column table where there first column is DSSTox_Substance_ID
+and the second column contains the predictions, then merge it with the overall chemical descriptors file:
+```{r merge_modelpred, eval=TRUE}
+for (this.model in MODEL.NAMES[MODEL.NAMES!="Stockholm"])
+{
+  if (this.model == "SHEDS.Direct")
+  {
+    these.preds <- SHEDS.direct[,c("DSSTox_Substance_Id","abs.tot.mgkg_50.")]
+  }
+  else if (this.model == "SHEDS.Indirect")
+  {
+    these.preds <- SHEDS.indirect[,c("DSSTox_Substance_Id","abs.tot.mgkg_50.")]  
+  }
+  else if (this.model == "FINE")
+  {
+    these.preds <- FINE[,c("dsstox_substance_id","X")]
+  }
+  else if (this.model == "Food.Contact")
+  {
+    these.preds <- Biryol[,c("DSSTox_Substance_Id","abs.tot.mgkg_50.")] 
+  }
+  else if (this.model == "REDS")
+  {
+    these.preds <- REDS[, .(DSSTox_Substance_Id, General.US.numeric)]
+  }
+  else if (this.model == "RAIDAR")
+  {
+    these.preds <- RAIDAR[, c("dsstox_substance_id", "mg.kg.d")]
+  }
+  else if (this.model == "RAIDAR.ICE")
+  {
+    these.preds <- RAIDAR[, c("dsstox_substance_id", "mg.kg.d.1")]
+    these.preds <- subset(these.preds,!is.na(mg.kg.d.1))
+  }
+  else if (this.model == "USETox.Pest")
+  {
+    these.preds <- usetox.pest[, c("DSSTox_Substance_Id","IF")]
+  }
+  else if (this.model == "USETox.Indust")
+  {
+    these.preds <- usetox.indust[, c("DSSTox_Substance_Id","IF")]
+  }
+  else if (this.model == "USETox.Diet")
+  {
+    these.preds <- usetox.diet[, c("DSSTox_Substance_Id","IF")]
+  }
+  else if (this.model == "USETox.Res")
+  {
+    these.preds <- usetox.res[, c("DSSTox_Substance_Id","IF")]
+  }
+  else if (this.model == "Production.Volume")
+  {
+    these.preds <- CDR.HPV[,c("DSSTox_Substance_Id","kgs.day")]
+  }
+  else
+  {
+    print(paste(this.model,"not found"))
+    browser()
+  }
+  colnames(these.preds) <- c("dsstox_substance_id",this.model)
+  these.preds <- as.data.frame(these.preds)
+  all.chems <- merge(all.chems,
+                   these.preds[,c("dsstox_substance_id",this.model)],
+                   by="dsstox_substance_id",
+                   all.x=TRUE)
+  if (length(unlist(unique(all.chems[,this.model,with=F])))==1) browser()
+}
+
+```
+Some of the models require special handling:
+```{r merge_modelpredspecial, eval=TRUE}
+
+
+# Since all chemicals above 25,000 lbs a year must be reported, we can
+# set all chems with NA to half of 25,000 lb.s a year:
+all.chems[is.na(Production.Volume),Production.Volume:=25000/2/2.204/365.25]
+
+#Stockholm convention is a Boolean:
+Stockholm.Conv <- Stockholm
+all.chems[,Stockholm:=0]
+all.chems[dsstox_substance_id%in%Stockholm.Conv[,"DSSTox_Substance_Id"],Stockholm:=1]
+
+#Calculate Csat,w in mg/L:
+all.chems[,NCCT_Csatw := 10^(NCCT_WS)*Structure_MolWt*1000]
+
+colnames(all.chems)[colnames(all.chems)=="NCCT_KOA"] <- "NCCT_LogKOA"
+#Calculate Kaw:
+all.chems[,NCCT_LogKAW := log10((10^NCCT_LogP)/(10^NCCT_LogKOA))]
+physchem.props <- unique(c(physchem.props,"NCCT_Csatw","NCCT_LogKAW","Structure_MolWt"))
+physchem.props[7] <- "NCCT_LogKOA"
+all.chems<-subset(all.chems,!duplicated(all.chems))
+all.chems<-subset(all.chems,!duplicated(dsstox_substance_id))
+all.chems<-subset(all.chems,!duplicated(CAS))
+```
+# Summarize Model Predictions
+```{r Model Table, eval=TRUE}
+model.table <- as.data.frame(matrix("",nrow=NUM.MODELS,ncol=6),stringsAsFactors=F)
+rownames(model.table) <- MODEL.NAMES
+colnames(model.table) <- c("Model","Version","Reference","Methods Section","Chemicals Predicted","Pathways")
+model.table["SHEDS.Direct","Model"] <- "EPA Stochastic Human Exposure Dose Simulator High Throughput (SHEDS-HT) Near-Field Direct"
+model.table["SHEDS.Indirect","Model"] <- "SHEDS-HT Near-field Indirect"
+model.table["SHEDS.Direct","Version"] <- "2017"
+model.table["SHEDS.Indirect","Version"] <- "2017"
+model.table["SHEDS.Direct","Reference"] <- "{Isaacs, 2017}"
+model.table["SHEDS.Indirect","Reference"] <- "{Isaacs, 2017}"
+model.table["SHEDS.Direct","Chemicals Predicted"] <- length(unique(SHEDS.direct$CAS))
+model.table["SHEDS.Indirect","Chemicals Predicted"] <- length(unique(SHEDS.indirect$CAS))
+model.table["SHEDS.Direct","Pathways"] <- "Residential (Near-Field)"
+model.table["SHEDS.Indirect","Pathways"] <- "Residential"
+model.table["SHEDS.Direct","Methods Section"] <- "3.6.6.1"
+model.table["SHEDS.Indirect","Methods Section"] <- "3.6.6.1"
+
+model.table["FINE","Model"] <- "Fugacity-based INdoor Exposure (FINE)"
+model.table["FINE","Version"] <- "2017"
+model.table["FINE","Reference"] <- "{Bennett and Furtaw, 2004; Shin et al., 2012}"
+model.table["FINE","Chemicals Predicted"] <- length(unique(FINE$CAS))
+model.table["FINE","Pathways"] <- "Residential"
+model.table["FINE","Methods Section"] <- "3.6.6.2"
+
+model.table["Food.Contact","Model"] <- "Food Contact Substance Migration Model"
+model.table["Food.Contact","Version"] <- "2017"
+model.table["Food.Contact","Reference"] <- "{Biryol, 2017}"
+model.table["Food.Contact","Chemicals Predicted"] <- length(unique(Biryol$CAS))
+model.table["Food.Contact","Pathways"] <- "Dietary"
+model.table["Food.Contact","Methods Section"] <- "3.6.4"
+
+model.table["REDS","Model"] <- "EPA Pesticide Reregistration Eligibility Documents (REDs) Exposure Assessments"
+model.table["REDS","Version"] <- "Through 2015"
+model.table["REDS","Reference"] <- "{Wetmore, 2012; Wetmore, 2015}"
+model.table["REDS","Chemicals Predicted"] <- length(unique(REDS$CAS))
+model.table["REDS","Pathways"] <- "Far-Field Pesticide"
+model.table["REDS","Methods Section"] <- "3.6.3"
+
+model.table["USETox.Indust","Model"] <- "United Nations Environment Program and Society for Environmental Toxicology and Chemistry toxicity model (USETox) Industrial Scenario"
+model.table["USETox.Pest","Model"] <- "USEtox Pesticide Scenario"
+model.table["USETox.Res","Model"] <- "USEtox Residential Scenario"
+model.table["USETox.Diet","Model"] <- "USEtox Dietary Scenario"
+
+model.table["USETox.Pest","Methods Section"] <- "3.6.5.2"
+model.table["USETox.Indust","Methods Section"] <- "3.6.5.1"
+model.table["USETox.Res","Methods Section"] <- "3.6.6.4"
+model.table["USETox.Diet","Methods Section"] <- "3.6.6.4"
+
+model.table["USETox.Pest","Version"] <- "2.0"
+model.table["USETox.Indust","Version"] <- "2.0"
+model.table["USETox.Res","Version"] <- "2.0"
+model.table["USETox.Diet","Version"] <- "2.0"
+
+model.table["USETox.Pest","Reference"] <- "{Rosenbaum, 2008}"
+model.table["USETox.Indust","Reference"] <- "{Fantke, 2011; Fantke, 2012; Fantke, 2013; Fantke, 2016; }"
+model.table["USETox.Res","Reference"] <- "{Jolliet,2015; Huang, 2016; Huang, 2017}"
+model.table["USETox.Diet","Reference"] <- "{Jolliet,2015; Huang, 2016; Ernstoff, 2017}"
+
+
+model.table["USETox.Pest","Chemicals Predicted"] <- dim(usetox.pest)[1]
+model.table["USETox.Indust","Chemicals Predicted"] <- dim(usetox.indust)[1]
+model.table["USETox.Res","Chemicals Predicted"] <- dim(usetox.res)[1]
+model.table["USETox.Diet","Chemicals Predicted"] <- dim(usetox.diet)[1]
+
+
+model.table["USETox.Pest","Pathways"] <- "Far-Field Pesticide"
+model.table["USETox.Indust","Pathways"] <- "Far-Field Industrial"
+model.table["USETox.Res","Pathways"] <- "Residential"
+model.table["USETox.Diet","Pathways"] <- "Dietary"
+
+
+model.table["RAIDAR","Model"] <- "Risk Assessment IDentification And Ranking (RAIDAR) Far-Field"
+model.table["RAIDAR","Version"] <- "2.95"
+model.table["RAIDAR","Reference"] <- "{Arnot, 2008}"
+model.table["RAIDAR","Chemicals Predicted"] <- dim(RAIDAR)[1]
+model.table["RAIDAR","Pathways"] <- "Far-Field Industrial and Pesticide"
+model.table["RAIDAR","Methods Section"] <- "3.6.5.3"
+
+model.table["RAIDAR.ICE","Model"] <- "RAIDAR-Indoor and Consumer Exposure (RAIDAR-ICE)  Near-Field"
+model.table["RAIDAR.ICE","Version"] <- "0.804"
+model.table["RAIDAR.ICE","Reference"] <- "{Arnot, 2014; Zhang, 2014}"
+model.table["RAIDAR.ICE","Chemicals Predicted"] <- dim(subset(RAIDAR,!is.na(as.numeric(mg.kg.d.1))))[1]
+model.table["RAIDAR.ICE","Pathways"] <- "Residential"
+model.table["RAIDAR.ICE","Methods Section"] <- "3.6.6.3"
+
+model.table["Production.Volume","Model"] <- "EPA Inventory Update Reporting and Chemical Data Reporting (CDR)"
+model.table["Production.Volume","Version"] <- "2015"
+model.table["Production.Volume","Reference"] <- "{U.S. Environmental Protection Agency, 2017}"
+model.table["Production.Volume","Chemicals Predicted"] <- length(unique(CDR.HPV$CAS))
+model.table["Production.Volume","Pathways"] <- "All"
+model.table["Production.Volume","Methods Section"] <- "3.6.1"
+
+#model.table["FDA.CEDI","Model"] <- "FDA Cumulative Estimated Daily Intake (CDI)"
+#model.table["FDA.CEDI","Version"] <- ""
+#model.table["FDA.CEDI","Reference"] <- "{U.S. Food & Drug Administration, 2017}"
+#model.table["FDA.CEDI","Chemicals Predicted"] <- length(unique(FDA$CAS))
+#model.table["FDA.CEDI","Pathways"] <- "Dietary"
+#model.table["FDA.CEDI","Methods Section"] <- "3.6.4"
+
+model.table["Stockholm","Model"] <- "Stockholm Convention of Banned Persistent Organic Pollutants"
+model.table["Stockholm","Version"] <- "2017"
+model.table["Stockholm","Reference"] <- "{Stockholm, 2017}"
+model.table["Stockholm","Chemicals Predicted"] <- length(unique(Stockholm$Substance_CASRN))
+model.table["Stockholm","Pathways"] <- "Far-Field Industrial and Pesticide" 
+model.table["Stockholm","Methods Section"] <- "3.6.2"
+
+model.table2 <-model.table
+model.table2$Predictor<- paste(model.table$Model," (",model.table$Version,")",model.table$Reference,sep="")
+model.table2["FDA.CEDI","Model"] <- "FDA Cumulative Estimated Daily Intake (CEDI) {U.S. Food & Drug Administration, 2017}" 
+model.table2 <- model.table2[order(model.table2$"Methods Section"),c("Predictor","Methods Section","Chemicals Predicted","Pathways")]
+
+write.csv(model.table2,file=paste("model.table-",Sys.Date(),".txt",sep=""))
+knitr::kable(model.table2)
+```
+# Save results
+```{r saveresults, eval=TRUE}
+save(positives,negatives,sources,file=paste("training-chems-",Sys.Date(),".RData",sep=""))
+saveRDS(all.chems, paste("all-chems-",Sys.Date(),".RData",sep=""))
+save(structure.desc, physchem.props,file=paste("descriptor-names-",Sys.Date(),".RData",sep=""))
+```
+
+
